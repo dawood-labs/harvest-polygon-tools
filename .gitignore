@@ -1,0 +1,25 @@
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.cache/
+*.egg-info/
+.venv/
+venv/
+.ipynb_checkpoints/
+# saved work of the tools
+*_work/
+# GIS data: never commit
+*.shp
+*.shx
+*.dbf
+*.prj
+*.cpg
+*.sbn
+*.sbx
+*.qix
+*.shp.xml
+*.gpkg
+*.gpkg-wal
+*.gpkg-shm
+*.tif
+*.tiff
