@@ -16,16 +16,25 @@ Steps (same result as the model)
      within the default XY tolerance of the model: 0.001 m, or 8.98e-9 degrees).
   4. Piece area in acres = m2 / 4046.85642 in the chosen projected CRS (default: UTM zone of the
      data centre). The value is compared as the model stores it (12 significant digits).
-  5. Pieces that touch remaining AND have area <= --sliver-acres (default 0.2) become 81
-     (switch off with --no-sliver-rule); all other pieces are 82.
+  5. Pieces that touch remaining AND have area <= --sliver-acres (default 0.2; or --sliver-area
+     in the --unit, the same physical size) become 81 (switch off with --no-sliver-rule); all
+     other pieces are 82.
   6. Dissolve by class and split into single parts: neighbouring pieces of one class that
      share an edge (not just a corner) or overlap become one polygon.
   Every point of the union of L1 ends up in exactly one class: where L1 polygons overlap and
   the model would give both classes, 81 is kept (the model's class-81 layer is unchanged) and
   82 is cut back.
-  7. Output: EPSG:4326, fields predicted (81 / 82) and area_ac (acres, 3 decimals). Pieces
-     below 0.01 m2 (numerical noise) are dropped. Check: acres 81 + acres 82 = acres of the
-     union of L1 (warning above 0.01 % difference).
+  7. Output: EPSG:4326, fields predicted (81 / 82) and ONE area field in the --unit: area_ac
+     (acres, 3 decimals, default), area_ha, area_rai (1 rai = 1,600 m2), area_m2 or area_km2.
+     Pieces below 0.01 m2 (numerical noise) are dropped. Check: 81 + 82 = the area of the
+     union of L1 (warning above 0.01 % difference, in every unit).
+  8. Quality gate before writing and a check of the saved file (read back), as in
+     preprocess_classified.py: single valid 2D polygons only, no null / empty / zero-area shapes,
+     no repeated vertices, no overlaps (same class: dissolved; 81 and 82: 81 wins). Exit code 3
+     when a problem is left. Dirty inputs (null, lines, points, Z values, self-intersections,
+     multi-parts, overlaps) are accepted: polygon parts only, one NOTE per layer with counts.
+Formats: inputs and output can be Shapefile, GeoPackage or GeoJSON (.geojson / .json); a GeoPackage
+with several layers needs --final-layer / --l1-layer unless it has only one polygon layer.
 
 How it scales: the machine (cores, free memory) is read first; the L1 polygons are cut into
 spatial chunks sized from the memory budget (available memory minus a buffer of 20 % of it, at
@@ -36,7 +45,8 @@ the number of chunks in parallel; --processes / --threads fix the layout. Each f
 saved in <output stem>_work/, so an interrupted run resumes where it stopped. The repaired copies
 of the inputs that only the overlay stage reads are deleted as soon as that stage is saved.
 Stage caches: changing only the sliver rule, its size or the projection reruns only the
-classification stage; changing only the classes to write reruns only the writing. A run with a new
+classification stage; changing only the unit, the classes to write or the output format reruns only
+the writing. Question mode always writes both classes (--classes is for flag mode). A run with a new
 output name reads the saved stages of the previous run in place (nothing there is changed) when its
 inputs and stage settings match. The work folder holds a marker file; the script only ever deletes
 its own files.
@@ -44,13 +54,13 @@ its own files.
 Run without arguments (or with --ask) for a question-and-answer mode; all choices are also
 available as flags:
     python postprocess_remaining.py --final qc.shp --l1 l1.shp --out result.shp [--sliver-acres 0.2]
+        [--unit acres|hectares|rai|m2|km2] [--sliver-area A] [--final-layer NAME] [--l1-layer NAME]
         [--no-sliver-rule] [--classes both|81|82] [--utm 47N | EPSG:32647] [--allow-non-utm]
         [--assume-crs] [--workers N] [--processes P] [--threads T] [--max-memory-gb G]
         [--memory-buffer-gb B] [--clean] [--summary-line]
 """
 import argparse
 import json
-import math
 import os
 import re
 import shutil
@@ -162,7 +172,18 @@ def area_m2(geoms, work_crs, area_crs):
 
 # ---------------------------------------------------------------- inputs
 def layer_crs(path):
-    return pyogrio.read_info(str(path)).get("crs")
+    """CRS of an input layer (the chosen layer of a GeoPackage; GeoJSON without crs = EPSG:4326)."""
+    return pc.vector_crs(path)
+
+
+def l1_bounds(path):
+    """(xmin, ymin, xmax, ymax) of the features of a layer that have a geometry; None when there are none."""
+    _, lb = pc.vector_bounds(path)
+    lb = np.asarray(lb).T
+    lb = lb[np.isfinite(lb).all(axis=1)] if len(lb) else lb
+    if len(lb) == 0:
+        return None
+    return (lb[:, 0].min(), lb[:, 1].min(), lb[:, 2].max(), lb[:, 3].max())
 
 
 def working_crs(final_path, l1_path, assume_crs=False):
@@ -689,13 +710,14 @@ def stage_keys(final_path, l1_path, out, area_crs, a):
           "assume_crs": bool(a["assume_crs"])}
     k2 = {"overlay": pc._hash(k1), "epsg": area_crs.to_epsg() or area_crs.to_wkt(), "rule": bool(a["rule"]),
           "sliver_acres": a["sliver_acres"] if a["rule"] else None}
-    k3 = {"classes": a["classes"], "out": str(Path(out).resolve()), "classes_key": pc._hash(k2)}
+    k3 = {"classes": a["classes"], "out": str(Path(out).resolve()), "classes_key": pc._hash(k2),
+          "unit": pc.get_unit(a.get("unit")).key}
     return k1, k2, k3
 
 
 KEY_NAMES = {"classes": "classes", "classes_key": "classification", "out": "output file", "final": "FINAL file",
              "l1": "L1 file", "assume_crs": "assume coordinate system", "epsg": "projection",
-             "rule": "sliver rule", "sliver_acres": "sliver size", "overlay": "overlay stage"}
+             "rule": "sliver rule", "sliver_acres": "sliver size", "overlay": "overlay stage", "unit": "unit"}
 
 
 def describe_changes(old, new):
@@ -705,42 +727,49 @@ def describe_changes(old, new):
 # ---------------------------------------------------------------- run
 def run(final, l1_path, out, sliver_acres=0.2, rule=True, utm=None, classes="both", workers=None,
         max_memory_gb=None, memory_buffer_gb=None, clean=False, allow_non_utm=False, assume_crs=False,
-        max_chunk_polygons=None, summary_line=False, processes=None, threads=None, memory_mode=None):
+        max_chunk_polygons=None, summary_line=False, processes=None, threads=None, memory_mode=None, unit=None,
+        final_layer=None, l1_layer=None):
+    """sliver_acres is the sliver size in acres (the physical size); unit = unit of the area field and of
+    everything shown (default acres)."""
     final, l1_path, out = Path(final).resolve(), Path(l1_path).resolve(), Path(out).resolve()
+    unit = pc.get_unit(unit)
     pc.start_clock()
-    if out.suffix.lower() not in (".shp", ".gpkg"):
-        raise UserError("the output must end with .shp or .gpkg")
+    if out.suffix.lower() not in pc.VECTOR_EXTS:
+        raise UserError("the output must end with .shp, .gpkg, .geojson or .json")
     if not out.parent.is_dir():
         raise UserError(f"output folder does not exist: {out.parent}")
     if not pc.folder_writable(out.parent):
         raise UserError(f"cannot write in the output folder {out.parent}")
     if classes not in CLASS_CHOICES:
         raise UserError("classes must be both, 81 or 82")
-    for p, what in ((final, "FINAL"), (l1_path, "L1")):
+    layers = {}
+    for p, what, flag, lay in ((final, "FINAL", "--final-layer", final_layer), (l1_path, "L1", "--l1-layer", l1_layer)):
+        if p.suffix.lower() not in pc.VECTOR_EXTS:
+            raise UserError(f"the {what} layer must be a vector file. {pc.FORMAT_HINT}")
+        layers[what] = pc.choose_layer(p, lay, what, flag)
         try:
-            pyogrio.read_info(str(p))
+            pc.vector_info(p)
         except Exception as e:
             raise UserError(f"cannot read the {what} layer {p}: {e}")
     wcrs = working_crs(final, l1_path, assume_crs)
-    _, lb = pyogrio.read_bounds(str(l1_path))
-    lb = np.asarray(lb).T
-    lb = lb[np.isfinite(lb).all(axis=1)]
-    if len(lb) == 0:
+    bounds = l1_bounds(l1_path)
+    if bounds is None:
         raise UserError("the L1 layer has no polygons")
-    bounds = (lb[:, 0].min(), lb[:, 1].min(), lb[:, 2].max(), lb[:, 3].max())
     lcrs = layer_crs(l1_path) or wcrs
     area_crs = pc.resolve_area_crs(utm, lcrs, bounds, allow_non_utm)
     bad = pc.locked_outputs(out)
     if bad:
         raise UserError(f"the output {out.name} is open in another program ({', '.join(bad)}). "
                         f"Close it in ArcMap/QGIS and run again, or choose another output name.")
-    ans = {"rule": bool(rule), "sliver_acres": float(sliver_acres), "classes": classes, "assume_crs": bool(assume_crs)}
+    ans = {"rule": bool(rule), "sliver_acres": float(sliver_acres), "classes": classes, "assume_crs": bool(assume_crs),
+           "unit": unit.key}
     work = out.parent / (out.stem + "_work")
     prev_last = load_last_run()     # read before it is replaced: its work folder may be reusable
     last = {"final": str(final), "l1": str(l1_path), "out": str(out),
             "utm": f"EPSG:{area_crs.to_epsg()}" if area_crs.to_epsg() else area_crs.to_wkt(),
             "work": str(work), "data_work": str(work), "answers": ans, "started": time.strftime("%Y-%m-%d %H:%M:%S"),
-            "status": "running", "progress": "starting", "pid": os.getpid(), "allow_non_utm": bool(allow_non_utm)}
+            "status": "running", "progress": "starting", "pid": os.getpid(), "allow_non_utm": bool(allow_non_utm),
+            "final_layer": layers["FINAL"], "l1_layer": layers["L1"]}
     save_last_run(last)
 
     def progress(msg, status="running", data_work=None):
@@ -881,7 +910,12 @@ def _run_locked(final, l1_path, out, work, wcrs, area_crs, ans, workers, max_mem
     if not have_classes and src is None and not man.get("overlay_done"):
         l1v, fv = work / "l1_valid.gpkg", work / "final_valid.gpkg"
         if not (chunks_bin.exists() and l1v.exists() and fv.exists()):
-            need = 4 * sum(q.stat().st_size for p in (final, l1_path) for q in pc._sig_paths(p, "l1") if q.exists())
+            in_bytes = sum(q.stat().st_size for p in (final, l1_path) for q in pc._sig_paths(p, "l1") if q.exists())
+            need = int(in_bytes * (4 + (pc.GEOJSON_BYTES_RATIO if pc.is_geojson(out) else 0)))
+            if pc.is_geojson(out) and in_bytes * pc.GEOJSON_BYTES_RATIO > pc.GEOJSON_NOTE_BYTES:
+                print(f"NOTE: the GeoJSON result may be about {in_bytes * pc.GEOJSON_BYTES_RATIO / 1024 ** 3:.1f} GB "
+                      f"of text; a GeoPackage (.gpkg) is about {pc.GEOJSON_BYTES_RATIO:.0f} times smaller and opens "
+                      f"faster.")
             free = shutil.disk_usage(out.parent).free
             if need + 50 * 1024 ** 2 > free:
                 e = DiskSpaceError(f"not enough disk space next to the output: about {need / 1024 ** 3:.2f} GB "
@@ -889,8 +923,21 @@ def _run_locked(final, l1_path, out, work, wcrs, area_crs, ans, workers, max_mem
                 e.needed, e.free = need, free
                 raise e
             progress("reading inputs")
-            l1 = pc.load_l1(l1_path, wcrs, workers=want)
-            fg = pc.load_l1(final, wcrs, workers=want)
+            rl, rf = {}, {}
+            l1 = pc.load_l1(l1_path, wcrs, workers=want, report=rl)
+            fg = pc.load_l1(final, wcrs, workers=want, report=rf)
+            if len(fg) > 1:                  # overlapping checked polygons: dissolved by the overlay (counted only)
+                tol_a = pc.NOISE_M2 if not pyproj.CRS(wcrs).is_geographic else pc.min_area_deg(fg)
+                k = len(pc._real_overlaps(fg, tol_a))
+                if k:
+                    rf["overlaps"] = k
+            if len(l1) == 0:
+                raise UserError("the L1 layer has no usable polygons"
+                                + (f" ({pc.report_text(rl)})" if pc.report_text(rl) else ""))
+            for what, r in (("L1", rl), ("FINAL", rf)):
+                if pc.input_note(what, r):
+                    print(f"NOTE: {pc.input_note(what, r)}")
+            man["input_notes"] = [x for x in (pc.input_note("L1", rl), pc.input_note("FINAL", rf)) if x]
             stage("read", f"inputs read, reprojected to the working CRS and made valid: {len(l1):,} L1 polygons, "
                           f"{len(fg):,} FINAL polygons")
             if not chunks_bin.exists():
@@ -949,7 +996,8 @@ def _run_locked(final, l1_path, out, work, wcrs, area_crs, ans, workers, max_mem
 
     # ---- stage 3: write
     progress("writing output")
-    wst, written, note = write_output(classified, out, wcrs, CLASS_CHOICES[ans["classes"]], want)
+    wst, written, note = write_output(classified, out, wcrs, CLASS_CHOICES[ans["classes"]], want, unit=ans.get("unit"),
+                                      area_crs=area_crs)
     stage("write", f"stage 3 write {written}")
     if note:
         notes.append(note)
@@ -965,7 +1013,8 @@ def _finish(stats, wst, ans, written, work, clean, times, notes, area_crs, summa
     print_summary(stats, wst, ans, out=written, work=work, clean=clean, times=times, notes=notes,
                   total_s=pc.run_seconds(), area_crs=area_crs, summary_line=summary_line, reused_from=reused_from)
     res = dict(stats)
-    res.update(written=str(written), written_stats=wst)
+    res.update(written=str(written), written_stats=wst,
+               geometry_ok=pc.geometry_ok(wst["geom"]) if wst and wst.get("geom") else True)
     return res
 
 
@@ -1060,15 +1109,19 @@ def finish_classes(tasks, work, clusters_path, wcrs, area_crs, tol, workers, bud
     return st
 
 
-def write_output(classified, out, wcrs, classes, workers, batch=200_000):
+def write_output(classified, out, wcrs, classes, workers, batch=200_000, unit=None, area_crs=None):
+    """Write the classes; the area field is in the unit (area_ac, area_ha, ...). Every batch passes the
+    quality gate (pc.gate) in the form it is written (EPSG:4326); the saved file is read back and checked."""
     out = Path(out)
+    unit = pc.get_unit(unit)
     tmp = out.with_name(out.stem + "__partial" + out.suffix)
     for x in pc.file_set(tmp, pc.out_exts(out)).values():
         if x.exists():
             x.unlink()
-    driver = "GPKG" if out.suffix.lower() == ".gpkg" else "ESRI Shapefile"
-    layer = out.stem if driver == "GPKG" else None
-    st = {"count": 0, "first": True, REMAIN: [0, 0.0], HARVEST: [0, 0.0]}
+    driver = pc.driver_of(out)
+    layer = None if driver == "ESRI Shapefile" else out.stem
+    st = {"count": 0, "first": True, REMAIN: [0, 0.0, 0.0], HARVEST: [0, 0.0, 0.0]}
+    repairs = {}
     to4326 = pyproj.CRS(wcrs) != pyproj.CRS(4326)
     buf = []
 
@@ -1078,8 +1131,7 @@ def write_output(classified, out, wcrs, classes, workers, batch=200_000):
         w = np.concatenate([b[0] for b in buf])
         c = np.concatenate([b[1] for b in buf])
         a = np.concatenate([b[2] for b in buf])
-        pyogrio.raw.write(str(tmp), geometry=w, field_data=[c.astype("int32"), a], fields=["predicted", "area_ac"],
-                          geometry_type="Polygon", crs="EPSG:4326", driver=driver, append=not st["first"], layer=layer)
+        pc.write_vector(tmp, w, [c.astype("int32"), a], ["predicted", unit.field], driver, layer, not st["first"])
         st["first"] = False
         buf.clear()
 
@@ -1088,12 +1140,27 @@ def write_output(classified, out, wcrs, classes, workers, batch=200_000):
         m = np.isin(d["cls"], classes)
         if not m.any():
             continue
-        wkb, cls, a = d["wkb"][m], d["cls"][m], np.round(d["m2"][m] / ACRE_M2, 3)
+        wkb, cls, m2 = d["wkb"][m], d["cls"][m], d["m2"][m]
+        g = shapely.from_wkb(wkb)
         if to4326:
-            wkb = pc.to_wkb(pc.project_geoms(shapely.from_wkb(wkb), wcrs, 4326, workers))
+            g = pc.project_geoms(g, wcrs, 4326, workers)
+            wkb = pc.to_wkb(g)
+        g2, rows, changed = pc.gate(g, cls, repairs)       # the features exactly as they are written
+        if changed.any() or len(g2) != len(g):
+            wkb, cls, m2 = wkb[rows], cls[rows], m2[rows].copy()
+            if changed.any():
+                wkb[changed] = pc.to_wkb(g2[changed])
+                m2[changed] = area_m2(g2[changed], pyproj.CRS(4326), area_crs or wcrs)
+            ok = m2 >= NOISE_M2
+            if not ok.all():
+                repairs["collapsed"] = repairs.get("collapsed", 0) + int((~ok).sum())
+            wkb, cls, m2 = wkb[ok], cls[ok], m2[ok]
+        a_ac = np.round(m2 / ACRE_M2, 3)
+        a = a_ac if unit.key == "acres" else np.round(m2 / unit.m2, unit.decimals)
         for c in (REMAIN, HARVEST):
             st[c][0] += int((cls == c).sum())
-            st[c][1] += float(a[cls == c].sum())
+            st[c][1] += float(a_ac[cls == c].sum())
+            st[c][2] += float(a[cls == c].sum())
         buf.append((wkb, cls, a))
         n += len(wkb)
         st["count"] += len(wkb)
@@ -1102,15 +1169,16 @@ def write_output(classified, out, wcrs, classes, workers, batch=200_000):
             n = 0
     flush()
     if st["first"]:
-        pyogrio.raw.write(str(tmp), geometry=empty(), field_data=[np.zeros(0, dtype="int32"), np.zeros(0)],
-                          fields=["predicted", "area_ac"], geometry_type="Polygon", crs="EPSG:4326", driver=driver,
-                          layer=layer)
-    n_read = pyogrio.read_info(str(tmp))["features"]
+        pc.write_vector(tmp, empty(), [np.zeros(0, dtype="int32"), np.zeros(0)], ["predicted", unit.field], driver,
+                        layer, False)
+    pc.finish_vector(tmp, driver)
+    n_read = pc.feature_count(tmp)
     if n_read != st["count"]:
         raise RuntimeError(f"output check failed: wrote {st['count']} polygons but the file has {n_read}")
     written, note = pc.install_output(tmp, out)
     res = {"count": st["count"], "n81": st[REMAIN][0], "acres81": st[REMAIN][1], "n82": st[HARVEST][0],
-           "acres82": st[HARVEST][1]}
+           "acres82": st[HARVEST][1], "unit": unit.key, "col81": st[REMAIN][2], "col82": st[HARVEST][2],
+           "repairs": repairs, "geom": pc.geometry_check(written)}
     return res, written, note
 
 
@@ -1126,46 +1194,55 @@ def _folder_size(p):
 
 
 def _summary_lines(st, wst, ans):
-    a81, a82, ul = st["acres81"], st["acres82"], st["l1_union_acres"]
+    unit = pc.unit_of_record(ans)
+    f = lambda v: pc.from_acres(v, unit)          # noqa: E731
+    w, d = unit.word, unit.decimals
+    a81, a82, ul = f(st["acres81"]), f(st["acres82"]), f(st["l1_union_acres"])
     diff = a81 + a82 - ul
     pct = 100 * diff / ul if ul else 0.0
-    rule = f"on, <= {ans['sliver_acres']} acres" if ans["rule"] else "off"
+    rule = f"on, <= {pc.size_number(ans['sliver_acres'], unit)} {w}" if ans["rule"] else "off"
     print(f"SUMMARY sliver_rule={rule} harvested_pieces={st['pieces']:,} touching_remaining={st['touching']:,} "
-          f"turned_to_81={st['absorbed']:,} ({st['absorbed_acres']:,.3f} acres) "
-          f"noise_pieces_removed={st['noise_overlay'] + st['noise']:,} ({st['noise_overlay_m2'] / ACRE_M2:.4f} acres) "
+          f"turned_to_81={st['absorbed']:,} ({f(st['absorbed_acres']):,.{d}f} {w}) "
+          f"noise_pieces_removed={st['noise_overlay'] + st['noise']:,} "
+          f"({f(st['noise_overlay_m2'] / ACRE_M2):.{d + 1}f} {w}) "
           f"overlapping_L1_groups={st['l1_overlap_groups']:,} harvested_pieces_cut_by_81={st['trimmed_82_pieces']:,}")
-    print(f"SUMMARY class 81: {st['n81']:,} polygons, {a81:,.3f} acres | class 82: {st['n82']:,} polygons, "
-          f"{a82:,.3f} acres | 81 + 82 = {a81 + a82:,.3f} acres | union of L1 = {ul:,.3f} acres | "
-          f"difference {diff:,.3f} acres ({pct:.4f} %)")
+    print(f"SUMMARY class 81: {st['n81']:,} polygons, {a81:,.{d}f} {w} | class 82: {st['n82']:,} polygons, "
+          f"{a82:,.{d}f} {w} | 81 + 82 = {a81 + a82:,.{d}f} {w} | union of L1 = {ul:,.{d}f} {w} | "
+          f"difference {diff:,.{d}f} {w} ({pct:.4f} %)")
     if wst:
+        c81, c82 = wst.get("col81", wst["acres81"]), wst.get("col82", wst["acres82"])
         print(f"SUMMARY written ({ans['classes']}): {wst['count']:,} polygons "
-              f"(81: {wst['n81']:,}, {wst['acres81']:,.3f} acres; 82: {wst['n82']:,}, {wst['acres82']:,.3f} acres; "
-              f"sums of the rounded area_ac)")
+              f"(81: {wst['n81']:,}, {c81:,.{d}f} {w}; 82: {wst['n82']:,}, {c82:,.{d}f} {w}; "
+              f"sums of the rounded {unit.field})")
 
 
 def print_summary(st, wst, ans, out=None, work=None, clean=False, times=None, notes=(), total_s=None, area_crs=None,
                   summary_line=False, reused_from=None):
     """NOTE lines, the RESULT block and, with --summary-line, the SUMMARY lines. Lines about reused
-    work are printed while the run goes, not repeated here."""
+    work are printed while the run goes, not repeated here. Areas are held in acres and shown in the
+    unit of the run; the area check compares in that unit with the same relative tolerance (0.01 %)."""
     for x in notes or ():
         print(f"NOTE: {x}")
+    unit = pc.unit_of_record(ans)
     a81, a82, ul = st["acres81"], st["acres82"], st["l1_union_acres"]
     diff = a81 + a82 - ul
     pct = 100 * diff / ul if ul else 0.0
     ok = abs(pct) <= 0.01
     n = lambda v: f"{v:,}"          # noqa: E731
-    ac = pc.acres_text
-    table = [("Class", "Polygons", "Acres"),
-             ("  81  Remaining cane", n(st["n81"]), ac(a81)),
-             ("  82  Harvested", n(st["n82"]), ac(a82)),
-             ("  Total (81 + 82)", n(st["n81"] + st["n82"]), ac(a81 + a82))]
+    ac = lambda v: pc.area_text(pc.from_acres(v, unit), unit)          # noqa: E731
+    share = lambda v: pc.pct_text(v, a81 + a82).rjust(9)              # noqa: E731
+    table = [("Class", "Polygons", unit.header, "% of area"),
+             ("  81  Remaining cane", n(st["n81"]), ac(a81), share(a81)),
+             ("  82  Harvested", n(st["n82"]), ac(a82), share(a82)),
+             ("  Total (81 + 82)", n(st["n81"] + st["n82"]), ac(a81 + a82), share(a81 + a82))]
     classes = CLASS_CHOICES[ans["classes"]]
     if wst:
-        w_sum = sum(wst[f"acres{c}"] for c in classes)
-        exact = sum({REMAIN: a81, HARVEST: a82}[c] for c in classes)
-        if abs(w_sum - exact) > 0.001:
-            table.extend(pc.wrap_rows(f"Note: adding up the area_ac column of the file gives {ac(w_sum)} acres "
-                                      f"(each polygon is rounded to 3 decimals)."))
+        w_sum = sum(wst.get(f"col{c}", wst[f"acres{c}"]) for c in classes)
+        exact = pc.from_acres(sum({REMAIN: a81, HARVEST: a82}[c] for c in classes), unit)
+        if abs(w_sum - exact) > 10 ** -unit.decimals:
+            table.extend(pc.wrap_rows(f"Note: adding up the {unit.field} column of the file gives "
+                                      f"{pc.area_text(w_sum, unit)} {unit.text} (each polygon is rounded to "
+                                      f"{unit.decimals} decimal{'s' if unit.decimals != 1 else ''})."))
     check = [("  L1 area", "", ac(ul)),
              ("  Difference", "", ac(diff), f"({abs(pct):.4f} %)  {'OK' if ok else 'CHECK'}")]
     if not ok:
@@ -1178,17 +1255,20 @@ def print_summary(st, wst, ans, out=None, work=None, clean=False, times=None, no
         k = st["trimmed_82_pieces"]
         check.extend(pc.wrap_rows(f"{pc.plural(k, 'harvested piece')} {'was' if k == 1 else 'were'} cut back where "
                                   f"{'it' if k == 1 else 'they'} overlapped remaining cane."))
-    noise = ("  Numerical noise removed", n(st["noise_overlay"] + st["noise"]), f"{st['noise_overlay_m2'] / ACRE_M2:.3f}")
+    noise = ("  Numerical noise removed", n(st["noise_overlay"] + st["noise"]), ac(st["noise_overlay_m2"] / ACRE_M2))
+    size = pc.size_in_unit(ans["sliver_acres"], unit)
     if ans["rule"]:
-        small = [(f"Small harvested pieces (rule: {ans['sliver_acres']} acres or smaller AND touching remaining cane)",
+        small = [(f"Small harvested pieces (rule: {size} or smaller AND touching remaining cane)",
                   [("  Harvested pieces found", n(st["pieces"])),
                    ("  Touching remaining cane", n(st["touching"])),
-                   ("  Changed to remaining cane", n(st["absorbed"]), ac(st["absorbed_acres"])), noise])]
+                   ("  Changed to remaining cane", n(st["absorbed"]), ac(st["absorbed_acres"]),
+                    f"({pc.pct_text(st['absorbed_acres'], ul)} % of L1)"), noise])]
     else:
         small = [("Cleaning (sliver rule is off)", [noise])]
     crs_txt = pc.crs_label(area_crs) if area_crs is not None else "?"
-    settings = [("  Sliver rule : " + (f"on, pieces of {ans['sliver_acres']} acres or smaller" if ans["rule"] else "off"),),
+    settings = [("  Sliver rule : " + (f"on, pieces of {size} or smaller" if ans["rule"] else "off"),),
                 (f"  Projection  : {crs_txt}",),
+                (f"  Unit        : {unit.text} (field {unit.field})",),
                 ("  Classes     : " + {"both": "both (81 and 82)", "81": "81 only", "82": "82 only"}[ans["classes"]],)]
     files = []
     if out is not None:
@@ -1202,12 +1282,15 @@ def print_summary(st, wst, ans, out=None, work=None, clean=False, times=None, no
         elif clean:
             files.append(("  Cache  : removed after the run (--clean)",))
         elif work is not None:
-            size = _folder_size(work)
-            big = " It is large; delete it when you no longer need quick reruns." if size > 500 * 1024 ** 2 else ""
-            files.extend(pc.cache_rows("Cache ", work, pc.human_size(size), "A rerun that only changes the sliver "
-                                       "rule, the projection, the classes or the output name reuses it. Safe to "
-                                       "delete." + big))
+            size_b = _folder_size(work)
+            big = " It is large; delete it when you no longer need quick reruns." if size_b > 500 * 1024 ** 2 else ""
+            files.extend(pc.cache_rows("Cache ", work, pc.human_size(size_b), "A rerun that only changes the sliver "
+                                       "rule, the projection, the unit, the classes or the output name reuses it. "
+                                       "Safe to delete." + big))
     sections = [("", table), ("Area check (remaining + harvested must equal L1)", check)] + small
+    if wst and wst.get("geom"):
+        sections.append((f"Geometry check (the saved file was read back, {wst['geom'].get('seconds', 0):.1f} s)",
+                         pc.geometry_rows(wst["geom"], wst.get("repairs"))))
     sections += [("Settings used", settings), ("Files", files)]
     if total_s is not None:
         names = (("plan", "plan"), ("read", "read"), ("overlay", "overlay"), ("rule", "rule and areas"),
@@ -1244,10 +1327,12 @@ def _classes_check(a):
 def interactive(defaults):
     print("Remaining cane (81) and harvested (82) from the checked layer and L1 - answer the questions, "
           "Enter keeps the [default].\n")
-    exts = (".shp", ".gpkg", ".geojson")
-    final = pc.ask_text("1) Checked remaining-cane layer (FINAL, .shp / .gpkg)", defaults.get("final"),
+    exts = pc.VECTOR_EXTS
+    final = pc.ask_text("1) Checked remaining-cane layer (FINAL, .shp / .gpkg / .geojson)", defaults.get("final"),
                         pc._file_check(exts, "FINAL layer"))
-    l1 = pc.ask_text("2) L1 layer (.shp / .gpkg)", defaults.get("l1"), pc._file_check(exts, "L1 layer"))
+    final_layer = pc.ask_layer(final, "FINAL layer")
+    l1 = pc.ask_text("2) L1 layer (.shp / .gpkg / .geojson)", defaults.get("l1"), pc._file_check(exts, "L1 layer"))
+    l1_layer = pc.ask_layer(l1, "L1")
     assume = False
     try:
         fc, lc = layer_crs(final), layer_crs(l1)
@@ -1263,27 +1348,18 @@ def interactive(defaults):
         assume = True
     out = ask_output(final.parent, final.stem + "_harvest_final",
                      pc.output_defaults(defaults.get("out"), defaults.get("final"), final))
-    rule = pc.ask_yes_no("4) Turn small harvested pieces that touch remaining cane into remaining cane?",
-                         defaults.get("rule", True))
-    sliver = defaults.get("sliver_acres", 0.2)
-    if rule:
-        sliver = pc.ask_text("   Largest piece size in acres (pieces <= this size change)", sliver, pc.acres_check(
-            lambda v: f"   That is large: pieces up to {v:g} acres will become remaining cane. Use it?"))
     crs = pyproj.CRS(lc or fc)
-    _, lb = pyogrio.read_bounds(str(l1))
-    lb = np.asarray(lb).T
-    lb = lb[np.isfinite(lb).all(axis=1)]
-    if len(lb) == 0:
+    bounds = l1_bounds(l1)
+    if bounds is None:
         raise UserError("the L1 layer has no polygons")
-    bounds = (lb[:, 0].min(), lb[:, 1].min(), lb[:, 2].max(), lb[:, 3].max())
     opts = pc.utm_options(crs, bounds)
     north = pc.data_centre(crs, bounds)[1] >= 0
     if opts:
-        print("5) Projection used to calculate acres (detected from the data extent):")
+        print("4) Projection used to calculate areas (detected from the data extent):")
         for i, (c, label, note) in enumerate(opts, 1):
             print(f"   {i}) {label}  EPSG:{c.to_epsg()}  ({note})")
     else:
-        print("5) The data cross the 180 degree meridian: no UTM zone can be suggested.")
+        print("4) The data cross the 180 degree meridian: no UTM zone can be suggested.")
     allow = False
     dflt = pc.default_area_crs(defaults.get("utm"), crs, bounds, opts)
     pc.say_earlier_choice(dflt)
@@ -1302,18 +1378,26 @@ def interactive(defaults):
             if not pc.ask_yes_no("   Use it anyway?", False):
                 continue
         break
-    classes = pc.ask_text("6) Classes to write: both, 81 (remaining) or 82 (harvested)", defaults.get("classes", "both"),
-                          _classes_check)
+    unit = pc.ask_unit("5)", defaults.get("unit"))
+    rule = pc.ask_yes_no("6) Turn small harvested pieces that touch remaining cane into remaining cane?",
+                         defaults.get("rule", True))
+    sliver = defaults.get("sliver_acres", 0.2)
+    if rule:
+        sliver = pc.ask_size("   Largest piece size", unit, sliver,
+                             lambda t: f"   That is large: pieces up to {t} will become remaining cane. Use it?",
+                             " (pieces <= this size change)")
+    classes = "both"                      # question mode always writes both classes (--classes in flag mode)
     print("\nYour answers:")
-    print(f"  FINAL       : {final}\n  L1 layer    : {l1}\n  output      : {out}")
-    print(f"  sliver rule : {'pieces <= ' + str(sliver) + ' acres touching remaining -> 81' if rule else 'off'}")
+    fl, ll = (f" (layer {x})" if pc.layer_kw(p) else "" for x, p in ((final_layer, final), (l1_layer, l1)))
+    print(f"  FINAL       : {final}{fl}\n  L1 layer    : {l1}{ll}\n  output      : {out}")
     print(f"  projection  : {utm.name} (EPSG:{utm.to_epsg()})")
-    print(f"  classes     : {classes}")
+    print(f"  unit        : {unit.text} (field {unit.field})")
+    print(f"  sliver rule : {'pieces <= ' + pc.size_in_unit(sliver, unit) + ' touching remaining -> 81' if rule else 'off'}")
     if not pc.ask_yes_no("Start?", True):
         print("Cancelled.")
         return None
     return dict(final=final, l1_path=l1, out=out, sliver_acres=sliver, rule=rule, utm=utm, classes=classes,
-                allow_non_utm=allow, assume_crs=assume)
+                allow_non_utm=allow, assume_crs=assume, unit=unit, final_layer=final_layer, l1_layer=l1_layer)
 
 
 def chunks_progress(work):
@@ -1334,11 +1418,16 @@ def describe_last(last):
     if state == "running" and pc._pid_alive(last.get("pid")) is False:
         state = "interrupted"
     print("A previous run was found:")
-    print(f"  FINAL       : {last['final']}\n  L1 layer    : {last['l1']}\n  output      : {last['out']}")
-    rule = f"pieces <= {ans.get('sliver_acres')} acres touching remaining -> 81" if ans.get("rule", True) else "off"
-    print(f"  sliver rule : {rule}")
+    fl, ll = (f" (layer {last[k]})" if last.get(k) else "" for k in ("final_layer", "l1_layer"))
+    print(f"  FINAL       : {last['final']}{fl}\n  L1 layer    : {last['l1']}{ll}\n  output      : {last['out']}")
+    unit = pc.unit_of_record(ans)
+    size = pc.size_in_unit(ans.get("sliver_acres", 0.2), unit)
+    rule = f"pieces <= {size} touching remaining -> 81" if ans.get("rule", True) else "off"
     print(f"  projection  : {pc.crs_label(last.get('utm'))}")
-    print(f"  classes     : {ans.get('classes', 'both')}")
+    print(f"  unit        : {unit.text}")
+    print(f"  sliver rule : {rule}")
+    if ans.get("classes", "both") != "both":          # only a flag-mode run can write one class
+        print(f"  classes     : {ans['classes']} only")
     extra = f" ({d} of {n} overlay chunks saved)" if n and state != "finished" else ""
     print(f"  status      : {pc.status_text(state, last.get('progress', ''))}{extra}, started {last.get('started', '?')}")
 
@@ -1348,13 +1437,18 @@ def _validate_cli(a, ap):
         p = Path(pc.clean_path(getattr(a, name)))
         if not p.is_file():
             ap.error(f"--{name}: file not found: {p}")
+        if p.suffix.lower() not in pc.VECTOR_EXTS:
+            ap.error(f"--{name}: {p.name} is not a vector file. {pc.FORMAT_HINT}")
+        try:
+            pc.choose_layer(p, getattr(a, name + "_layer"), name.upper() if name == "l1" else "FINAL",
+                            f"--{name}-layer")
+        except UserError as e:
+            ap.error(f"--{name}: {e}")
     out = Path(pc.clean_path(a.out))
-    if out.suffix.lower() not in (".shp", ".gpkg"):
-        ap.error("--out must end with .shp or .gpkg")
+    if out.suffix.lower() not in pc.VECTOR_EXTS:
+        ap.error("--out must end with .shp, .gpkg, .geojson or .json")
     if not out.parent.is_dir():
         ap.error(f"--out: folder does not exist: {out.parent}")
-    if a.sliver_acres < 0 or not math.isfinite(a.sliver_acres):
-        ap.error("--sliver-acres must be 0 or more")
     for name in ("workers", "processes", "threads"):
         v = getattr(a, name)
         if v is not None and v < 1:
@@ -1366,32 +1460,37 @@ def _validate_cli(a, ap):
     try:
         l1p = pc.clean_path(a.l1)
         crs = layer_crs(l1p) or layer_crs(pc.clean_path(a.final))
-        _, lb = pyogrio.read_bounds(l1p)
-        lb = np.asarray(lb).T
-        lb = lb[np.isfinite(lb).all(axis=1)]
+        bounds = l1_bounds(l1p)
     except Exception as e:
         ap.error(f"cannot read the layers ({e})")
     if crs is None:
         ap.error("neither layer has a coordinate system")
-    if len(lb) == 0:
+    if bounds is None:
         ap.error("--l1 has no polygons")
     try:
-        return pc.resolve_area_crs(a.utm, crs, (lb[:, 0].min(), lb[:, 1].min(), lb[:, 2].max(), lb[:, 3].max()),
-                                   a.allow_non_utm, warn=False)
+        return pc.resolve_area_crs(a.utm, crs, bounds, a.allow_non_utm, warn=False)
     except UserError as e:
         ap.error(f"--utm: {e}")
 
 
 def main(argv=None):
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
-    ap.add_argument("--final", help="checked remaining-cane layer (.shp / .gpkg)")
-    ap.add_argument("--l1", help="L1 layer: area that had cane before this report")
-    ap.add_argument("--out", help="output .shp or .gpkg")
-    ap.add_argument("--sliver-acres", type=float, default=0.2,
-                    help="harvested pieces touching remaining cane with area <= this become 81 (default 0.2)")
+    ap.add_argument("--final", help="checked remaining-cane layer (.shp, .gpkg, .geojson or .json)")
+    ap.add_argument("--final-layer", default=None, help="layer of the FINAL file when it has several (a GeoPackage)")
+    ap.add_argument("--l1", help="L1 layer: area that had cane before this report (.shp, .gpkg, .geojson or .json)")
+    ap.add_argument("--l1-layer", default=None, help="layer of the L1 file when it has several (a GeoPackage)")
+    ap.add_argument("--out", help="output .shp, .gpkg, .geojson or .json")
+    ap.add_argument("--sliver-acres", type=float, default=None,
+                    help="harvested pieces touching remaining cane with area <= this many acres become 81, whatever "
+                         "--unit is (default 0.2)")
+    ap.add_argument("--sliver-area", type=float, default=None,
+                    help="the same size in the unit of --unit (default: the same size as 0.2 acres)")
+    ap.add_argument("--unit", default="acres",
+                    help="unit of the area field and of the result: acres (area_ac, default), hectares (area_ha), "
+                         "rai (area_rai), m2 (area_m2) or km2 (area_km2); a list number 1-5 or a name also work")
     ap.add_argument("--no-sliver-rule", action="store_true", help="keep every harvested piece as 82")
     ap.add_argument("--classes", choices=sorted(CLASS_CHOICES), default="both", help="classes to write")
-    ap.add_argument("--utm", default=None, help="projected CRS for acres: 47N, 32647 or EPSG:32647 (default: auto)")
+    ap.add_argument("--utm", default=None, help="projected CRS for areas: 47N, 32647 or EPSG:32647 (default: auto)")
     ap.add_argument("--allow-non-utm", action="store_true", help="accept a projected CRS that is not a UTM zone")
     ap.add_argument("--assume-crs", action="store_true",
                     help="a layer without coordinate system is taken to be in the other layer's system")
@@ -1424,7 +1523,7 @@ def main(argv=None):
                 la = last.get("answers", {})
                 defaults = dict(final=a.final or pc._existing(last.get("final")), l1=a.l1 or pc._existing(last.get("l1")),
                                 out=last["out"], rule=la.get("rule", True), sliver_acres=la.get("sliver_acres", 0.2),
-                                classes=la.get("classes", "both"), utm=last.get("utm"))
+                                utm=last.get("utm"), unit=pc.unit_of_record(la).key)
                 last = None    # its input files are gone: straight to the questions
             if last:
                 describe_last(last)
@@ -1433,11 +1532,13 @@ def main(argv=None):
                     ans = dict(final=Path(last["final"]), l1_path=Path(last["l1"]), out=Path(last["out"]),
                                sliver_acres=la.get("sliver_acres", 0.2), rule=la.get("rule", True),
                                utm=pyproj.CRS(last["utm"]), classes=la.get("classes", "both"),
-                               allow_non_utm=last.get("allow_non_utm", False), assume_crs=la.get("assume_crs", False))
+                               allow_non_utm=last.get("allow_non_utm", False), assume_crs=la.get("assume_crs", False),
+                               unit=pc.unit_of_record(la), final_layer=last.get("final_layer"),
+                               l1_layer=last.get("l1_layer"))
                 else:
                     epsg = pyproj.CRS(last["utm"]).to_epsg()
                     defaults = dict(final=last["final"], l1=last["l1"], out=last["out"], rule=la.get("rule", True),
-                                    sliver_acres=la.get("sliver_acres", 0.2), classes=la.get("classes", "both"),
+                                    sliver_acres=la.get("sliver_acres", 0.2), unit=pc.unit_of_record(la).key,
                                     utm=f"EPSG:{epsg}" if epsg else None)
                     print()
             if ans is None:
@@ -1467,13 +1568,17 @@ def main(argv=None):
     if not (a.final and a.l1 and a.out):
         ap.error("--final, --l1 and --out are required (or run without arguments for questions)")
     utm = _validate_cli(a, ap)
-    if a.sliver_acres > pc.LARGE_ACRES and not a.no_sliver_rule:
-        print(f"NOTE: --sliver-acres {a.sliver_acres:g} is large: harvested pieces up to {a.sliver_acres:g} acres that "
+    unit, sliver, given = pc.cli_size(a.unit, a.sliver_acres, a.sliver_area, "--sliver-acres", "--sliver-area", ap)
+    if sliver > pc.LARGE_ACRES and not a.no_sliver_rule:
+        print(f"NOTE: {given} is large: harvested pieces up to {pc.size_in_unit(sliver, unit)} that "
               f"touch remaining cane become remaining cane.")
     try:
-        run(Path(pc.clean_path(a.final)), Path(pc.clean_path(a.l1)), Path(pc.clean_path(a.out)), a.sliver_acres,
-            not a.no_sliver_rule, utm, a.classes, allow_non_utm=a.allow_non_utm, assume_crs=a.assume_crs,
-            summary_line=a.summary_line, **common)
+        res = run(Path(pc.clean_path(a.final)), Path(pc.clean_path(a.l1)), Path(pc.clean_path(a.out)), sliver,
+                  not a.no_sliver_rule, utm, a.classes, allow_non_utm=a.allow_non_utm, assume_crs=a.assume_crs,
+                  summary_line=a.summary_line, unit=unit, final_layer=a.final_layer, l1_layer=a.l1_layer,
+                  **common)
+        if res and not res.get("geometry_ok", True):
+            sys.exit(3)                     # the file is written, but the geometry check found a problem
     except UserError as e:
         print(f"ERROR: {e}", file=sys.stderr)
         sys.exit(2)

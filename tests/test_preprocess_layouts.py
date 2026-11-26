@@ -23,7 +23,9 @@ from rasterio.transform import from_origin
 
 _ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(_ROOT))
+sys.path.insert(0, str(Path(__file__).resolve().parent))
 import preprocess_classified as pc  # noqa: E402
+from output_checks import assert_clean_output  # noqa: E402
 
 pc.LAST_RUN = Path(tempfile.mkdtemp()) / "last_run.json"   # never touch the user's own last-run record
 
@@ -134,6 +136,7 @@ def run_tool(d, r, l1, tag, do_filter, tile, procs=None, threads=None, workers=N
     with contextlib.redirect_stdout(io.StringIO()):
         pc.run(r, l1, out, min_acres=0.0, keep_slivers=True, do_filter=do_filter, tile_size=tile, max_memory_gb=1,
                clean=True, processes=procs, threads=threads, workers=workers, utm="31N")
+    assert_clean_output(out)
     return read_out(out)
 
 
@@ -345,7 +348,7 @@ def test_ask_output_three_questions():
     assert res == d / "r_remaining_cane.shp"
     assert f"3) Output folder [{d}]:" in txt and "   Output name [r_remaining_cane]:" in txt
     assert "   A shapefile cannot be larger than 2 GB; choose 2 for very large areas." in txt
-    assert "   Save as:  1) Shapefile (.shp)   2) GeoPackage (.gpkg)  [1]:" in txt
+    assert "   Save as:  1) Shapefile (.shp)   2) GeoPackage (.gpkg)   3) GeoJSON (.geojson)  [1]:" in txt
     res, txt = _piped(pc.ask_output, [str(d), "bad:name", "CON", "dot.", "my out (v2).shp", "gpkg"], d, "x", {})
     assert res == d / "my out (v2).gpkg" and "cannot contain :" in txt and "reserved name" in txt and "dot" in txt
     res, _ = _piped(pc.ask_output, [str(d / "new sub" / "a.gpkg"), "", "", ""], d, "x", {})   # full path pasted

@@ -6,7 +6,9 @@ from pathlib import Path
 import numpy as np
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
+sys.path.insert(0, str(Path(__file__).resolve().parent))
 import preprocess_classified as pc  # noqa: E402
+from output_checks import assert_clean_output  # noqa: E402
 
 pc.LAST_RUN = Path(tempfile.mkdtemp()) / "last_run.json"   # never touch the user's own last-run record
 
@@ -281,6 +283,7 @@ def test_tiled_run_equals_single_tile():
                max_memory_gb=1, clean=True)
         _, _, g, _ = pyogrio.raw.read(str(d / f"{tag}.gpkg"))
         res[tag] = shapely.from_wkb(g)
+        assert_clean_output(d / f"{tag}.gpkg")
     a, b = res["tiles"], res["single"]
     assert len(a) == len(b) > 0
     assert shapely.symmetric_difference(shapely.union_all(a), shapely.union_all(b)).area < 1e-12
@@ -517,7 +520,7 @@ def test_question_mode_projection_default():
     import tempfile
     d = Path(tempfile.mkdtemp())
     r, l1 = _small_case(d)                                             # data centre in UTM zone 31N
-    answers = [str(r), str(l1), str(d / "new.gpkg"), "", "", "", "", "", "", "", "n"]   # folder, name, format
+    answers = [str(r), str(l1), str(d / "new.gpkg"), "", "", "", "", "", "", "", "", "n"]   # folder, name, format
     for prev, want in (("EPSG:32647", "[1]:"), ("EPSG:32632", "[EPSG:32632]:"), ("EPSG:32631", "[EPSG:32631]:")):
         res, txt = _piped(pc.interactive, answers, dict(utm=prev))
         line = [x for x in txt.split("\n") if "Choose number, zone" in x][0]

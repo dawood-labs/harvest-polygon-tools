@@ -3,8 +3,7 @@
 ## 1. In short
 1. Tool 1 (`preprocess_classified.py`) reads a classified raster (1 = cane) and L1. It makes cane polygons (81).
 2. You check and edit these polygons in QGIS.
-3. Tool 2 (`postprocess_remaining.py`) makes the final layer: 81 Remaining cane, 82 Harvested.
-4. Tool 2 also checks that 81 + 82 equals the L1 area.
+3. Tool 2 (`postprocess_remaining.py`) makes the final layer: 81 Remaining cane, 82 Harvested. It checks 81 + 82 = L1 area.
 
 Order: raster + L1 -> TOOL 1 -> check in QGIS -> TOOL 2 -> 81 and 82 polygons
 
@@ -19,12 +18,10 @@ pip install numpy rasterio shapely pyogrio pyproj
 ```
 python -c "import numpy, rasterio, shapely, pyogrio, pyproj; print(shapely.__version__)"
 ```
-5. Put BOTH .py files in the SAME folder, for example `C:\tools`.
-   Tool 2 needs Tool 1 next to it.
+5. Put BOTH .py files in the SAME folder, for example `C:\tools`. Tool 2 needs Tool 1 next to it.
 ## 3. Before every run
 - [ ] Close heavy programs (QGIS projects, many browser tabs). The tool uses almost all free memory.
-- [ ] Do not start other heavy work during the run.
-- [ ] Charger on. Sleep off.
+- [ ] Do not start other heavy work during the run. Charger on. Sleep off.
 - [ ] Free disk space on the output drive.
 - [ ] The output file is not open in QGIS or ArcMap.
 
@@ -38,52 +35,60 @@ Enter keeps the value in [brackets]. Paste paths in any style.
 | Question as printed | What you type | Enter gives |
 |---|---|---|
 | `1) Classified raster (.tif):` | `C:\work\report1\classified.tif` | nothing (first run) |
-| `2) L1 layer (.shp / .gpkg):` | `D:\data\L1.shp` | nothing (first run) |
+| `2) L1 layer (.shp / .gpkg / .geojson):` | `D:\data\L1.shp` | nothing (first run) |
+| `   Which layer is the L1 [1]:` (only for a .gpkg with several layers) | a number from the list | the first polygon layer |
 | `3) Output folder [C:\work\report1]:` | a folder, or a full file path | the raster folder |
 | `   Output name [classified_remaining_cane]:` | a name, no extension | raster name + `_remaining_cane` |
-| `   Save as:  1) Shapefile (.shp)   2) GeoPackage (.gpkg)  [1]:` | `2` for a very big result | 1 (shapefile) |
+| `   Save as:  1) Shapefile (.shp)   2) GeoPackage (.gpkg)   3) GeoJSON (.geojson)  [1]:` | `2` for a very big result | 1 (shapefile) |
 | `4) Apply the majority filter? [Y/n]:` | `n` = no filter | yes |
 | `   Number of neighbours (4 or 8) [4]:` | `8` | 4 |
 | `   Choose number, zone (e.g. 47N) or EPSG code [1]:` | a number, `47N` or `32647` | the suggested zone |
-| `6) Remove slivers? [Y/n]:` | `n` = keep all | yes |
-| `   Minimum area in acres [0.2]:` | e.g. `0.5` (above 5 the tool asks `Use it? [y/N]`) | 0.2 acres |
+| `6) Unit for areas:` ... `Choose a number or type the name [1]:` | `2`, `hectares`, `ha`, `rai`, `m2`, `km2` | 1 (acres) |
+| `7) Remove slivers? [Y/n]:` | `n` = keep all | yes |
+| `   Minimum area in acres [0.2]:` | e.g. `0.5` (a big value asks `Use it? [y/N]`) | 0.2 acres |
 | `Start? [Y/n]:` | `n` = cancel (`Cancelled.`) | start |
 
 Notes:
 - A full file path at the folder question works.
 - A bad name asks again: `A file name cannot contain : ? (Windows rule). Spaces, - _ ( ) [ ] are fine.`
 - Majority filter = smooths the raster. Slivers = tiny polygons (noise).
-- Projection: the tool lists every UTM zone the raster touches. Number 1 = centre zone. Acres use the ONE zone you pick.
+- Unit: the list is `1) Acres  2) Hectares  3) Rai (Thailand)  4) Square metres  5) Square kilometres`.
+  A spelling mistake asks first: `Did you mean Hectares? [Y/n]:`. Other units show the same size as 0.2 acres:
+  `   Minimum area in rai [0.506 = 0.2 acres]:`. The number you type is in your unit.
+- Projection: the tool lists every UTM zone the raster touches. Number 1 = centre zone. Areas use the ONE zone you pick.
   On a later run you may see `Enter keeps your earlier choice: UTM 47N (EPSG:32647)`. Enter keeps that zone.
 - A non-UTM choice (e.g. 3857) asks `Use WGS 84 / Pseudo-Mercator anyway? [y/N]:`. Press Enter (no).
 - A far zone asks `UTM zone 36 is 11 zones away from the data centre (zone 47); areas get less accurate far from the zone centre.` Press Enter (no).
 - If the output exists: `report2.shp was made by an earlier run of this tool. Replace it? [Y/n]:`.
 Read the summary (`Your answers:`) before you press Enter at `Start?`.
 
-While it runs you see `Machine: ...` and `Plan: ...` lines, for example:
-```
-Plan: 15 processes x 1 thread = 15 tiles at a time, 4 tiles of 256 x 256 cells (planned 21 bytes per cell)
-```
+While it runs you see `Machine: ...` and `Plan: ...` lines (processes x threads = tiles done at the same time;
+`kept free` = memory left for Windows; `memory mode: desktop` = normal PC).
 
-- Process = a copy of the program. Thread = a worker inside a copy. Tile = a square piece of the raster.
-- Processes x threads = tiles done at the same time.
-- `memory mode: desktop` = normal PC. `container` = server with a hard memory limit.
-- `using up to` = memory the tool may use. `kept free` = memory left for Windows.
-
-What you get at the end (shortened):
+What you get at the end (shortened, real run):
 ```
-================================ RESULT ================================
-Remaining cane polygons written :         3
-Total area                      : 1,597.586 acres
-How the result was reached          Polygons      Acres
-  Cane pieces inside L1                  156  1,602.158
-  Removed: slivers below 0.5 acres       153      4.572
-  Written to the output                    3  1,597.586
+==================================== RESULT ====================================
+Remaining cane polygons written :     28,246
+Total area                      : 28,731.028 acres
+
+How the result was reached          Polygons       Acres  % of area
+  Cane pieces inside L1               42,656  30,069.735      100.0
+  Removed: slivers below 0.2 acres    14,364   1,338.707        4.5
+  Removed: numerical noise                46       0.000        0.0
+  Written to the output               28,246  28,731.028       95.5
+
+Geometry check (the saved file was read back, 0.6 s)
+  Single polygons                     28,246          OK
+  Invalid (GEOS rules)                     0          OK
+  Overlapping pairs                        0          OK
+  Repaired before saving                   0
 ```
 
 - `Written to the output` = what is in your file. Write these numbers in your report.
-- Big results may add: `Note: adding up the area_ac column of the file gives 110,675.646 acres (each polygon is rounded to 3 decimals).` This is rounding.
-- Fields: `predicted` (81) and `area_ac` (acres). Coordinate system: WGS 84.
+- `% of area` = share of the first row. Removed + written = 100 % (rounding can give 99.9 or 100.1).
+- Big results may add: `Note: adding up the area_ac column of the file gives 28,731.001 acres (each polygon is rounded to 3 decimals).` This is rounding.
+- Geometry check: the tool reads the saved file again. Every row must say `OK`. `CHECK` comes with a `WARNING:` line. Send a screenshot.
+- Fields: `predicted` (81) and ONE area field: `area_ac` (acres), `area_ha`, `area_rai`, `area_m2` or `area_km2`. Coordinate system: WGS 84.
 ## 5. Check in QGIS
 1. Open the Tool 1 file in QGIS with the raster or an image.
 2. Edit by hand if needed. Save the layer as a file. Close it in QGIS.
@@ -95,34 +100,39 @@ python postprocess_remaining.py
 
 | Question as printed | What you type | Enter gives |
 |---|---|---|
-| `1) Checked remaining-cane layer (FINAL, .shp / .gpkg):` | your checked file | nothing (first run) |
-| `2) L1 layer (.shp / .gpkg):` | the same L1 as in Tool 1 | nothing (first run) |
+| `1) Checked remaining-cane layer (FINAL, .shp / .gpkg / .geojson):` | your checked file | nothing (first run) |
+| `2) L1 layer (.shp / .gpkg / .geojson):` | the same L1 as in Tool 1 | nothing (first run) |
 | `3) Output folder [...]:` | a folder, or a full file path | the checked file folder |
 | `   Output name [checked_harvest_final]:` | a name, no extension | checked name + `_harvest_final` |
-| `   Save as: ... [1]:` | `2` = GeoPackage | 1 (shapefile) |
-| `4) Turn small harvested pieces that touch remaining cane into remaining cane? [Y/n]:` | `n` = keep all as 82 | yes |
-| `   Largest piece size in acres (pieces <= this size change) [0.2]:` | e.g. `0.5` | 0.2 acres |
-| `5) Projection used to calculate acres ...` | as in Tool 1 | the suggested zone |
-| `6) Classes to write: both, 81 (remaining) or 82 (harvested) [both]:` | `81` or `82` | both |
+| `   Save as: ... 3) GeoJSON (.geojson)  [1]:` | `2` = GeoPackage, `3` = GeoJSON | 1 (shapefile) |
+| `4) Projection used to calculate areas ...` | as in Tool 1 | the suggested zone |
+| `5) Unit for areas:` ... `Choose a number or type the name [1]:` | as in Tool 1 | 1 (acres) |
+| `6) Turn small harvested pieces that touch remaining cane into remaining cane? [Y/n]:` | `n` = keep all as 82 | yes |
+| `   Largest piece size in hectares (pieces <= this size change) [0.081 = 0.2 acres]:` | e.g. `0.2` | 0.2 acres |
 | `Start? [Y/n]:` | `n` = cancel | start |
 
-Use the same L1 and the same zone as in Tool 1. The end of the run (shortened):
+Tool 2 always writes both classes (81 and 82).
+
+Use the same L1, zone and unit as in Tool 1. The end of the run (shortened, real run):
 
 ```
-================================ RESULT ================================
-Class                        Polygons      Acres
-  81  Remaining cane                3  1,580.002
-  82  Harvested                     5    465.634
-  Total (81 + 82)                   8  2,045.636
+==================================== RESULT ====================================
+Class                        Polygons       Acres  % of area
+  81  Remaining cane           28,208  31,260.373       77.5
+  82  Harvested                19,073   9,084.749       22.5
+  Total (81 + 82)              47,281  40,345.122      100.0
+
 Area check (remaining + harvested must equal L1)
-  L1 area                              2,045.636
-  Difference                               0.000  (0.0000 %)  OK
+  L1 area                              40,345.122
+  Difference                                0.000  (0.0000 %)  OK
+
 Small harvested pieces (rule: 0.2 acres or smaller AND touching remaining cane)
-  Changed to remaining cane         2      0.205
+  Changed to remaining cane   175,644   2,529.345  (6.3 % of L1)
 ```
 
 - Area check must say `OK`. If it says `CHECK`, a `WARNING: 81 + 82 differs from the area of L1 ...` line follows. Send a screenshot.
-- Small harvested pieces: small 82 pieces that touch 81 become 81. The last row shows how many.
+- Small harvested pieces: small 82 pieces that touch 81 become 81. The row shows how many, and their share of L1.
+- The `Geometry check` section is the same as in Tool 1.
 
 ## 7. Run again
 Start the same tool. You see `A previous run was found:` and the old answers.
@@ -131,7 +141,7 @@ Then: `Continue the last run with these settings? [Y/n]:`
 |---|---|---|
 | Continue after a stop, power cut or Ctrl+C | Enter at `Continue ...` | Finished work is reused: `resuming: 722 of 2209 tiles already done` |
 | Same settings, run was finished | Enter at `Continue ...` | `The output ... was already up to date for these settings; nothing was written again.` |
-| Change only sliver size, projection or classes | `n`, then Enter on all, change one value | Only the last step runs, in seconds: `Setting changed: sliver size (0.2 -> 0.5). Only the last step runs again.` |
+| Change only sliver size, projection, unit or format | `n`, then Enter on all, change one value | Only the last step runs, in seconds: `Setting changed: unit (acres -> hectares). Only the last step runs again.` |
 | Change only the output name | `n`, then type the new name | `Reusing saved work from <folder>` |
 | Change the filter (Tool 1) | `n`, then change the filter answer | `Setting changed: number of neighbours (4 -> 8). Tiles must be recomputed.` then `Discard them and recompute? [Y/n]:` Enter = yes |
 | Raster, L1 or checked file changed | Run again | `The file ... was modified since the last run (...). Tiles must be recomputed.` (Tool 2: `Inputs changed since the saved overlay: ...`) |
@@ -145,7 +155,10 @@ After `n`, every question shows your old answer in [brackets].
 | `File not found: nofile.tif. Paste the full path of the raster.` | Wrong path | Paste the right path |
 | `A file name cannot contain ...` | Bad character in the name | Type the name again |
 | `The L1 layer has no coordinate system (.prj missing).` | L1 has no .prj | Fix it in QGIS. Answer `y` only if sure. Enter stops the run |
-| `Please answer y or n.` / `Not understood. Type a list number, a zone like 47N, or an EPSG code like 32647.` / `Type both, 81 or 82.` / `Type a number, e.g. 0.2.` | Wrong answer | Answer again |
+| `Please answer y or n.` / `Not understood. Type a list number, a zone like 47N, or an EPSG code like 32647.` / `Type a number, e.g. 0.2.` / `Type a number from 1 to 5 or a unit name, e.g. acres, hectares, rai.` | Wrong answer | Answer again |
+| `The L1 layer must be a vector file. Use a Shapefile (.shp), a GeoPackage (.gpkg) or a GeoJSON file (.geojson / .json).` | Wrong file type | Paste a .shp, .gpkg or .geojson file |
+| `NOTE: L1: 595 invalid polygons repaired.` | The layer had broken shapes; the tool fixed or skipped them | Nothing. Fix the layer in QGIS if the counts are big |
+| `WARNING: the saved file has geometry problems the tool could not repair: ...` | Rare. The file is saved anyway | Send a screenshot |
 | `ERROR: preprocess_classified.py was not found. Put preprocess_classified.py in the same folder as this file.` | Tool 2 is alone in its folder | Put both .py files together |
 | `ERROR: python package 'rasterio' is missing. Install it with: pip install rasterio ...` | Package missing | Run the pip command |
 | `ERROR: the output X is open in another program (...)` | File open in QGIS/ArcMap | Close it, or use another name |
@@ -153,19 +166,20 @@ After `n`, every question shows your old answer in [brackets].
 | `tile ... does not fit in memory even when split; ...` | Not enough memory | Close programs. Run again |
 
 ## 9. Good to know
-- Saved work: the folder `<output name>_work` sits next to each output. It can get big (size is in the RESULT).
-  Delete it when no run is active. `--clean` does it for you.
+- Saved work: the folder `<output name>_work` sits next to each output (size is in the RESULT). Delete it when no run is active; `--clean` does it for you.
 - Tool 1 saves a copy of the prepared L1 in your home folder: `.preprocess_classified\l1_prepared` (max 2 GB, safe to delete).
-- Acres are calculated in ONE UTM zone, the one you choose. Use the same zone for every report.
-- To copy the old workflow: the old files were made with no filter and no sliver removal in Tool 1.
-  Answer `n` to the filter and `n` to slivers. Then use the 0.2 acre rule in Tool 2 (the default).
+- Areas are calculated in ONE UTM zone, the one you choose. Use the same zone for every report.
+- Units: 1 acre = 4,046.85642 m2, 1 hectare = 10,000 m2, 1 rai = 1,600 m2. Pick one unit and keep it for every report.
+- Formats: in and out, .shp, .gpkg and .geojson all work. A .geojson is about 2.5 times bigger than a .shp. A shapefile cannot be bigger than 2 GB: use GeoPackage for very big results.
+- To copy the old workflow: answer `n` to the filter and `n` to slivers in Tool 1, then use the 0.2 acre rule in Tool 2 (the default).
   Areas the analyst added by hand come only from your QGIS check.
 - The result does not depend on the computer: every machine gives the same polygons and acres.
 - Limits: the 8-neighbour filter and the outer row of the raster are not checked against ArcMap. With under about 2 GB free memory, the tool may use a little more than planned.
-- A shapefile cannot be bigger than 2 GB. Use GeoPackage for very big results.
 - If something goes wrong, send a screenshot of the whole window.
 ## 10. Without questions
 ```
 python preprocess_classified.py --raster C:\work\report1\classified.tif --l1 D:\data\L1.shp --out C:\work\report1\remaining_cane.shp --min-acres 0.2 --utm 47N --neighbors 4
 python postprocess_remaining.py --final C:\work\report1\checked.shp --l1 D:\data\L1.shp --out C:\work\report1\final.shp --sliver-acres 0.2 --utm 47N
+python postprocess_remaining.py --final C:\work\report1\checked.gpkg --l1 D:\data\L1.gpkg --l1-layer fields --out C:\work\report1\final.geojson --unit rai --utm 47N
 ```
+`--min-acres` / `--sliver-acres` are always acres. `--min-area` / `--sliver-area` are in the `--unit`. Exit code 3 = the geometry check found a problem.

@@ -18,7 +18,9 @@ import shapely
 from shapely.geometry import MultiPolygon, Polygon, box
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
+sys.path.insert(0, str(Path(__file__).resolve().parent))
 import postprocess_remaining as ppr  # noqa: E402
+from output_checks import assert_clean_output  # noqa: E402
 
 ACRE = 4046.85642
 CRS = "EPSG:32631"            # metric working CRS of the synthetic cases (neutral open-sea coordinates)
@@ -97,7 +99,10 @@ def run_case(final, l1, d=None, final_crs=CRS, l1_crs=CRS, **kw):
     kw.setdefault("workers", 2)
     kw.setdefault("max_memory_gb", 2)
     kw.setdefault("utm", "EPSG:32631")
-    res, txt = quiet(ppr.run, f, lp, d / kw.pop("name", "out.gpkg"), **kw)
+    out = d / kw.pop("name", "out.gpkg")
+    res, txt = quiet(ppr.run, f, lp, out, **kw)
+    assert_clean_output(res["written"])                      # every written file passes the geometry check
+    assert res["geometry_ok"] and "Geometry check (the saved file was read back" in txt
     return res, txt, d
 
 
@@ -298,8 +303,8 @@ def test_question_mode():
     d = Path(tempfile.mkdtemp())
     f = write(d / "f.gpkg", [B(0, 0, 200, 196)])
     l1 = write(d / "l1.gpkg", [B(0, 0, 200, 200)])
-    answers = ["& '" + str(f).replace("/", "\\") + "'", '"' + str(l1) + '"', str(d / "new"), "", "bad:name", "q", "3", "2",
-               "", "0.1", "", "both", "n"]
+    answers = ["& '" + str(f).replace("/", "\\") + "'", '"' + str(l1) + '"', str(d / "new"), "", "bad:name", "q", "4", "2",
+               "", "", "", "0.1", "n"]
     old = sys.stdin
     sys.stdin = io.StringIO("".join(a + "\n" for a in answers))
     try:
@@ -308,7 +313,7 @@ def test_question_mode():
         sys.stdin = old
     assert res is None and "Cancelled." in txt and "1) UTM 31N" in txt and "pieces <= 0.1 acres" in txt
     assert "Create it?" in txt and (d / "new").is_dir() and "Windows rule" in txt
-    assert "Type 1 (shapefile) or 2 (GeoPackage)." in txt
+    assert "Type 1 (shapefile), 2 (GeoPackage) or 3 (GeoJSON)." in txt
     assert "[f_harvest_final]" in txt and str(d / "new" / "q.gpkg") in txt and "2 GB" in txt
 
 

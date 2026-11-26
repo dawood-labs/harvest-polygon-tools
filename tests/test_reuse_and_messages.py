@@ -156,7 +156,7 @@ def test_pre_result_rows_same_basis():
     for size in (0.0001, 0.0002):
         _, txt = quiet(pc.run, r, l1, d / "o.gpkg", min_acres=size, workers=2, max_memory_gb=1)
         lines = txt.splitlines()
-        get = lambda k: float([x for x in lines if x.strip().startswith(k)][0].split()[-1].replace(",", ""))  # noqa: E731
+        get = lambda k: float([x for x in lines if x.strip().startswith(k)][0].split()[-2].replace(",", ""))  # noqa: E731
         first, sl, no, written = (get(k) for k in ("Cane pieces inside L1", "Removed: slivers", "Removed: numerical",
                                                    "Written to the output"))
         assert abs(first - sl - no - written) <= 0.0011, txt
@@ -199,13 +199,13 @@ def test_pre_question_defaults_after_no_and_skip_when_inputs_gone():
     pc.save_last_run({"raster": str(r), "l1": str(l1), "out": str(d / "prev out.gpkg"), "utm": "EPSG:32631",
                       "work": str(d / "prev out_work"), "answers": {"do_filter": True, "neighbors": 4},
                       "status": "finished", "progress": "finished", "started": "x"})
-    answers = ["n", "", "", "", "", "", "", "", "", "", "", "n"]
+    answers = ["n", "", "", "", "", "", "", "", "", "", "", "", "n"]
     _, txt = piped(pc.main, answers, ["--ask"])
     assert "A previous run was found" in txt and "Cancelled." in txt
-    assert f"3) Output folder [{d}]" in txt and "Output name [prev out]" in txt and "(.gpkg)  [2]:" in txt
+    assert f"3) Output folder [{d}]" in txt and "Output name [prev out]" in txt and "(.geojson)  [2]:" in txt
     pc.save_last_run({"raster": str(d / "gone.tif"), "l1": str(l1), "out": str(d / "prev out.gpkg"),
                       "utm": "EPSG:32631", "answers": {}, "status": "finished", "progress": "finished"})
-    _, txt = piped(pc.main, [str(r), "", "", "", "", "", "", "", "", "", "n"], ["--ask"])
+    _, txt = piped(pc.main, [str(r), "", "", "", "", "", "", "", "", "", "", "n"], ["--ask"])
     assert "A previous run was found" not in txt and "Continue the last run" not in txt and "Cancelled." in txt
 
 
@@ -442,7 +442,7 @@ def test_changed_shapefile_is_one_line_per_layer():
 def test_question_details():
     d = Path(tempfile.mkdtemp())
     r, l1 = small_raster(d)
-    answers = [str(r), str(l1), str(d), "o", "2", "", "", "", "", "9", "n", "7", "y", "n"]
+    answers = [str(r), str(l1), str(d), "o", "2", "", "", "", "", "", "9", "n", "7", "y", "n"]
     _, txt = piped(pc.interactive, answers, dict(utm="EPSG:32632"))
     assert "   Enter keeps your earlier choice: UTM 32N (EPSG:32632)" in txt
     assert "That is large: pieces smaller than 9 acres will be removed. Use it? [y/N]" in txt
@@ -463,7 +463,8 @@ def test_late_setting_change_lines():
     quiet(pc.run, r, l1, d / "o.gpkg", min_acres=0.2, workers=2, max_memory_gb=1)
     _, txt = quiet(pc.run, r, l1, d / "o.gpkg", min_acres=0.5, workers=2, max_memory_gb=1)
     assert "Setting changed: sliver size (0.2 -> 0.5). Only the last step runs again." in txt
-    f, lp = post_case(d)
+    (d / "post").mkdir()
+    f, lp = post_case(d / "post")                                # its own folder: l1.gpkg is another file
     post_run(f, lp, d / "p.gpkg")
     _, txt = post_run(f, lp, d / "p.gpkg", sliver_acres=0.5)
     assert "Setting changed: sliver size (0.2 -> 0.5). Only the last steps run again" in txt
@@ -512,9 +513,9 @@ def test_output_defaults_follow_the_input():
     r1, l1 = small_raster(d / "old")
     r2, _ = small_raster(d / "new")
     prev = {"raster": str(r1), "out": str(d / "old" / "prev_out.gpkg"), "utm": "EPSG:32631"}
-    ans = [str(r2), str(l1), "", "", "", "", "", "", "", "", "", "n"]
+    ans = [str(r2), str(l1), "", "", "", "", "", "", "", "", "", "", "n"]
     _, txt = piped(pc.interactive, ans, dict(prev, l1=str(l1)))
-    assert f"3) Output folder [{d / 'new'}]" in txt and "Output name [r_remaining_cane]" in txt and "(.gpkg)  [2]:" in txt
+    assert f"3) Output folder [{d / 'new'}]" in txt and "Output name [r_remaining_cane]" in txt and "(.geojson)  [2]:" in txt
     _, txt = piped(pc.interactive, [str(r1)] + ans[1:], dict(prev, l1=str(l1)))
     assert f"3) Output folder [{d / 'old'}]" in txt and "Output name [prev_out]" in txt
     f1, lp = post_case(d / "old")
@@ -522,6 +523,6 @@ def test_output_defaults_follow_the_input():
     prev = {"final": str(f1), "l1": str(lp), "out": str(d / "old" / "test_output_harvest_final_2.shp"), "utm": "EPSG:32631"}
     ans = [str(f2), str(lp), "", "", "", "", "", "", "", "", "n"]
     _, txt = piped(ppr.interactive, ans, prev)
-    assert f"3) Output folder [{d / 'new'}]" in txt and "Output name [final_harvest_final]" in txt and "(.gpkg)  [1]:" in txt
+    assert f"3) Output folder [{d / 'new'}]" in txt and "Output name [final_harvest_final]" in txt and "(.geojson)  [1]:" in txt
     _, txt = piped(ppr.interactive, [str(f1)] + ans[1:], prev)
     assert f"3) Output folder [{d / 'old'}]" in txt and "Output name [test_output_harvest_final_2]" in txt
