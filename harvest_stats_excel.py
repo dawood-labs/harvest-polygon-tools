@@ -2184,8 +2184,11 @@ def ask_out(default_dir, default_stem, previous=None, label="7) Output folder"):
 
 
 def ask_levels(fields, defaults):
-    """'How many levels ...' then the field of every level (number or name, never twice) and its title."""
+    """'How many levels ...' then the field of every level (number or name, never twice) and its title.
+    Nothing is asked that has only one possible answer: a layer with one field has one level, and the last
+    level takes the only field left. Levels chosen from many values to few are offered in the right order."""
     names = [f[0] for f in fields]
+    n_values = {f[0]: f[1] for f in fields}
     old = defaults.get("levels") or []
     old_ok = old if all(lv.get("field") in names for lv in old) else []
     n_def = str(len(old_ok) or 1)
@@ -2194,7 +2197,11 @@ def ask_levels(fields, defaults):
         if a.strip().isdigit() and 1 <= int(a) <= len(names):
             return int(a), None
         return None, f"Type a number from 1 to {len(names)}."
-    n = pc.ask_text("2) How many levels do you want statistics for?", n_def, n_check)
+    if len(names) == 1:
+        n = 1
+        print("2) The layer has one field, so the statistics have one level.")
+    else:
+        n = pc.ask_text("2) How many levels do you want statistics for?", n_def, n_check)
     levels = []
     for i in range(n):
         used = [lv["field"] for lv in levels]
@@ -2218,7 +2225,12 @@ def ask_levels(fields, defaults):
             dflt = str(names.index(old_ok[i]["field"]) + 1)
         q = (f"   Field for level {i + 1} (the largest areas)" if i == 0
              else f"   Field for level {i + 1} (inside level {i})")
-        name = pc.ask_text(q, dflt, f_check)
+        free = [x for x in names if x not in used]
+        if len(free) == 1:                                # one field left: nothing to choose
+            name = free[0]
+            print(f"{q}: {name}  (the only field{' left' if used else ''})")
+        else:
+            name = pc.ask_text(q, dflt, f_check)
         t_def = name
         if i < len(old_ok) and old_ok[i]["field"] == name and old_ok[i].get("title"):
             t_def = old_ok[i]["title"]
@@ -2228,6 +2240,14 @@ def ask_levels(fields, defaults):
             return (t, None) if t else (None, "Type a title, or press Enter to keep the field name.")
         title = pc.ask_text("   Column title for this level", t_def, t_check)
         levels.append({"field": name, "title": title})
+    counts = [n_values.get(lv["field"], 0) for lv in levels]
+    if any(a > b for a, b in zip(counts, counts[1:])):    # e.g. 26 small units chosen above 8 large ones
+        was = " > ".join(f"{lv['title']} ({pc.plural(c, 'value')})" for lv, c in zip(levels, counts))
+        better = [lv for _, _, lv in sorted(zip(counts, range(len(levels)), levels))]
+        now = " > ".join(lv["title"] for lv in better)
+        print(f"   Your order is {was}. The largest areas come first and usually have the fewest values.")
+        if pc.ask_yes_no(f"   Use the order {now} instead?", True):
+            levels = better
     return levels
 
 

@@ -358,7 +358,8 @@ def test_question_mode_first_report_then_only_the_new_report(tmp_path, monkeypat
         crops, step_rule(800, lambda x, y: 282 if 1500 < y < 1800 and 300 < x < 1300 else None)))
     r3 = report(tmp_path / "r_2026-01-25.gpkg", crops, harvest_classes(crops, step_rule(1200)))
     # first report: every question (boundary, 2 levels + titles, report, date, no previous, zone, unit, output)
-    left = typed(monkeypatch, [str(bp), "2", "region", "Zone", "block", "Part", str(r1), "", "", "32631", "2",
+    # (the boundary has two fields: level 2 takes the one that is left, only its title is asked)
+    left = typed(monkeypatch, [str(bp), "2", "region", "Zone", "Part", str(r1), "", "", "32631", "2",
                                str(tmp_path), "one", "", ""])
     hs.main(["--ask"])
     assert list(left) == [] and (tmp_path / "one.xlsx").is_file()
@@ -414,9 +415,9 @@ def test_edit_at_start_keeps_every_answer(tmp_path, monkeypatch, capsys):
     crops = crop_squares()
     r1 = report(tmp_path / "r_2026-01-05.gpkg", crops, harvest_classes(
         crops, step_rule(400, lambda x, y: 282 if 1500 < y < 1800 and 300 < x < 1300 else None)))
-    first = [str(bp), "2", "region", "Zone", "block", "Part", str(r1), "2026-01-06", "", "Cloud", "32631", "2",
+    first = [str(bp), "2", "region", "Zone", "Part", str(r1), "2026-01-06", "", "Cloud", "32631", "2",
              str(tmp_path), "one", "n"]                   # 'n' at Start? = edit
-    again = ["", "", "", "", "", "Section", "", "", "", "", "", "", "", "", ""]      # only the 2nd title changes
+    again = ["", "", "", "", "Section", "", "", "", "", "", "", "", "", ""]          # only the 2nd title changes
     left = typed(monkeypatch, first + again + [""])
     hs.main(["--ask"])
     text = capsys.readouterr().out
@@ -497,6 +498,31 @@ def test_parts_follow_the_free_memory(tmp_path, monkeypatch):
     monkeypatch.setattr(pc, "available_memory", lambda: 0.3 * gb)
     assert hs.plan_parts(f, 5_000_000)[0] == 48            # almost nothing free: many small parts, no crash
     assert hs.plan_parts(f, 3000)[0] == 1                  # never parts of a few features
+
+
+def test_levels_ask_nothing_with_one_possible_answer(monkeypatch, capsys):
+    two = [("name", 26, ["a", "b"]), ("name_2", 8, ["x", "y"])]
+    typed(monkeypatch, ["2", "2", "Zone", "Village"])       # 2 levels, level 1 = field 2, its title, title of level 2
+    levels = hs.ask_levels(two, {})
+    text = capsys.readouterr().out
+    assert levels == [{"field": "name_2", "title": "Zone"}, {"field": "name", "title": "Village"}]
+    assert "Field for level 2 (inside level 1): name  (the only field left)" in text
+    typed(monkeypatch, ["Area"])                          # a layer with one field: only the title is asked
+    assert hs.ask_levels([("zone", 5, [])], {}) == [{"field": "zone", "title": "Area"}]
+    text = capsys.readouterr().out
+    assert "The layer has one field, so the statistics have one level." in text and "How many levels" not in text
+    typed(monkeypatch, ["2", "1", "", "", ""])            # small units chosen first: the right order is offered
+    assert [lv["field"] for lv in hs.ask_levels(two, {})] == ["name_2", "name"]
+    text = capsys.readouterr().out
+    assert "Your order is name (26 values) > name_2 (8 values)." in text
+    assert "Use the order name_2 > name instead? [Y/n]" in text
+    typed(monkeypatch, ["2", "1", "", "", "n"])           # ... and 'n' keeps what was typed
+    assert [lv["field"] for lv in hs.ask_levels(two, {})] == ["name", "name_2"]
+    capsys.readouterr()
+    three = two + [("part", 40, [])]
+    typed(monkeypatch, ["2", "2", "", "1", ""])           # fields to choose from: both are asked
+    assert [lv["field"] for lv in hs.ask_levels(three, {})] == ["name_2", "name"]
+    assert "the only field" not in capsys.readouterr().out
 
 
 def test_negative_period_written_and_warned(tmp_path):
@@ -1030,14 +1056,14 @@ def test_question_mode(tmp_path):
 
 
 def test_question_mode_rejects_wrong_answers(tmp_path):
-    bp = boundary(tmp_path / "b.gpkg")
+    bp = boundary(tmp_path / "b.gpkg", three=True)
     crops = crop_squares()
     rp = report(tmp_path / "r.gpkg", crops, harvest_classes(crops, step_rule(700)))
     answers = [str(bp), "5", "2", "1", "", "1", "2", "", str(rp), "2026-13-01", "12-01-2026",
                str(tmp_path / "missing.xlsx"), "", "EPSG:32631", "", "", "", ""]
     code, txt = ask(answers)
     assert code == 0, txt
-    assert "Type a number from 1 to 2." in txt
+    assert "Type a number from 1 to 3." in txt
     assert "region is already level 1. Choose another field." in txt
     assert "is not a real date" in txt
     assert "Previous workbook not found" in txt

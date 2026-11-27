@@ -202,7 +202,9 @@ levels, projection, unit) and asks `Add the next report to this season? [Y/n]`. 
 | `   Name for class ...` (only for a class other than 81 and 82) | a name | the code, or the name used before |
 | `3) Output folder` and `Output name` | - | next to the report, `<report name>_stats` |
 
-Everything else comes from the previous workbook. Type `n` to answer all the questions again (new season, other
+Everything else comes from the previous workbook. The tool never asks what has only one possible answer: with
+two fields and two levels it takes the field that is left for level 2 and asks only its title; and when the levels
+are typed from many values to few it offers the right order. Type `n` to answer all the questions again (new season, other
 boundary). Keep one copy of the scripts per mill folder: each copy remembers its own season.
 ```
 python harvest_stats_excel.py
