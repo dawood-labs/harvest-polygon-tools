@@ -526,11 +526,12 @@ def test_workbook_structure_charts_and_pivot(tmp_path):
         cdef = z.read("xl/pivotCache/pivotCacheDefinition1.xml").decode()
         ptab = z.read("xl/pivotTables/pivotTable1.xml").decode()
         header, rows, _ = stats_table(outs[-1])
-        n_val = len(header) - 2 - 2                      # value columns of the pivot: all but the levels and the two %
-        last_col = openpyxl.utils.get_column_letter(len(header) - 2)
+        n_val = len(header) - 2 - 4                      # shown: all but the 2 levels and the 4 total columns
+        last_col = openpyxl.utils.get_column_letter(len(header))
         assert 'refreshOnLoad="1"' in cdef and 'sheet="Stats"' in cdef
         assert f'ref="A2:{last_col}{2 + len(rows) - 1}"' in cdef          # the table without its Totals row
-        assert f'recordCount="{len(rows) - 1}"' in cdef and cdef.count("<cacheField ") == len(header) - 2
+        assert f'recordCount="{len(rows) - 1}"' in cdef and cdef.count("<cacheField ") == len(header)
+        assert ptab.count("<pivotField ") == len(header) and ptab.count('dataField="1"') == n_val     # 4 unticked
         assert "pageField" not in ptab and '<field x="-2"' in ptab and ptab.count("<dataField ") == n_val
         assert 'name="Sum of Total Crop Area"' in ptab and 'rowHeaderCaption="region / block"' in ptab
         assert "r:id" not in ptab.split(">", 1)[0]
@@ -539,7 +540,9 @@ def test_workbook_structure_charts_and_pivot(tmp_path):
     top = hs.PIVOT_TOP
     assert pv["A1"].value == "Harvest by region and block" and pv.cell(row=top, column=1).value == "region / block"
     heads = [pv.cell(row=top, column=2 + j).value for j in range(n_val)]
-    assert heads == [f"Sum of {h}" for h in header[2:-2]]
+    assert heads == [f"Sum of {h}" for h in header[2:-4]]
+    assert pv.cell(row=top, column=2 + n_val).value is None
+    assert any(sel.activeCell == f"B{top + 1}" for sel in pv.sheet_view.selection)     # inside: field list shows
     body = [r for r in pv.iter_rows(min_row=top + 1, max_col=1 + n_val)]
     grand = [c.value for c in body[-1]]
     assert grand[0] == "Grand Total"

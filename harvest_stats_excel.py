@@ -1011,9 +1011,10 @@ def pivot_tree(tab):
 
 
 def pivot_columns(tab, header):
-    """(titles of the value columns of the pivot, their captions): every Stats column from 'Total Crop Area' to
-    'Total Remaining Crop'. The two % columns are left out: a sum of percentages means nothing."""
-    cols = header[tab.nl:len(header) - 2]
+    """(titles of the value columns shown in the pivot, their captions): 'Total Crop Area' and every per-date
+    column of the Stats sheet. The four total columns at the end (total harvested, total remaining and their %)
+    are fields of the pivot too, but not ticked: the user adds them from the field list when wanted."""
+    cols = header[tab.nl:len(header) - 4]
     return cols, [f"Sum of {h}" for h in cols]
 
 
@@ -1030,11 +1031,12 @@ def write_pivot_cells(pv, tab, unit, header):
     lines = [f"Each row is one {titles[0]}"
              + (f"; the rows under it are its {titles[1]}" if nl > 1 else "")
              + f". All areas in {unit.text}. The last row is the whole area.",
-             "Columns: total crop area, the area harvested in each period (from the report before to that date), "
-             f"then total harvested and remaining crop on {last}.",
-             "This is a pivot table on the sheet 'Stats': click a - or + beside a name to close or open it, "
-             "double-click a number to see the rows behind it,",
-             "or click inside the table and drag fields in the list on the right to build another view."]
+             "Columns: total crop area, then the area harvested in each period (from the report before to that "
+             "date).",
+             "This is a pivot table on the sheet 'Stats'. The field list on the right opens when a cell of the "
+             "table is selected: tick a field to add its column,",
+             f"for example the total harvested or the remaining crop on {last}. Click a - or + beside a name to "
+             "close or open it."]
     for i, text in enumerate(lines):
         put(pv, 2 + i, 1, text, font=font(10, color=C_INK2))
     top = PIVOT_TOP
@@ -1068,6 +1070,10 @@ def write_pivot_cells(pv, tab, unit, header):
     for j in range(nv):
         pv.column_dimensions[get_column_letter(2 + j)].width = 17
     pv.freeze_panes = pv.cell(row=top + 1, column=2)
+    inside = f"B{top + 1}"                       # a selected cell inside the pivot: Excel then shows the field list
+    for sel in pv.sheet_view.selection:
+        if sel.pane in (None, "bottomRight"):
+            sel.activeCell, sel.sqref = inside, inside
     return top, r, 1 + nv
 
 
@@ -1083,15 +1089,17 @@ def add_pivot(pv, st, tab, header, rows, hr, pivot_ref, wb):
                                       RowColField, RowColItem, TableDefinition)
     nl = tab.nl
     cols, captions = pivot_columns(tab, header)
-    nv = len(cols)
-    nf = nl + nv
+    nv = len(cols)                                        # value columns shown
+    nf = len(header)                                      # every column of the table is a field
     fields, idx, as_text = [], [], []
     for j in range(nf):
         vals = [rv[j] for rv in rows]
         if j >= nl:                                       # a value column: numbers, no items
+            nums = [v for v in vals if v is not None] or [0.0]
             fields.append(CacheField(name=header[j], numFmtId=0, sharedItems=SharedItems(
                 containsSemiMixedTypes=False, containsString=False, containsNumber=True,
-                minValue=float(min(vals)), maxValue=float(max(vals)))))
+                containsBlank=(len(nums) < len(vals)) or None,
+                minValue=float(min(nums)), maxValue=float(max(nums)))))
             idx.append(None)
             as_text.append(False)
             continue
@@ -1117,8 +1125,12 @@ def add_pivot(pv, st, tab, header, rows, hr, pivot_ref, wb):
 
     def item_of(j, v):
         return idx[j][str(v) if (as_text[j] and v is not None) else v]
-    recs = [Record(_fields=[Number(v=float(rv[j])) if j >= nl else Index(v=item_of(j, rv[j])) for j in range(nf)])
-            for rv in rows]
+
+    def value(j, v):
+        if j < nl:
+            return Index(v=item_of(j, v))
+        return Missing() if v is None else Number(v=float(v))
+    recs = [Record(_fields=[value(j, rv[j]) for j in range(nf)]) for rv in rows]
     src_ref = f"A{hr}:{get_column_letter(nf)}{hr + len(rows)}"
     source = CacheSource(type="worksheet", worksheetSource=WorksheetSource(ref=src_ref, sheet=st.title))
     cache = CacheDefinition(refreshOnLoad=True, createdVersion=6, refreshedVersion=6, minRefreshableVersion=3,
@@ -1127,7 +1139,9 @@ def add_pivot(pv, st, tab, header, rows, hr, pivot_ref, wb):
 
     pfields = []
     for j in range(nf):
-        if j >= nl:
+        if j >= nl + nv:
+            pfields.append(PivotField(showAll=False))             # in the field list, not ticked
+        elif j >= nl:
             pfields.append(PivotField(dataField=True, showAll=False))
         else:
             items = [FieldItem(x=i) for i in range(len(idx[j]))] + [FieldItem(t="default")]

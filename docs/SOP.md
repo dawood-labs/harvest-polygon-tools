@@ -220,7 +220,7 @@ What the workbook holds:
 | Dashboard | key numbers in tiles, charts (progress, per period, per unit, top 10 remaining), a summary table |
 | Stats | one row per unit; `Crop Harvested on DD-MM-YYYY` = harvested in that period only; `Totals` row |
 | By ... | the same table for each larger level |
-| Pivot | pivot table: one row per unit, columns = total crop, harvested in each period, total harvested, remaining |
+| Pivot | pivot table: one row per unit, columns = total crop and harvested in each period (tick more fields in the list on the right) |
 | Data | long table (one row per unit, date and measure) for your own pivots |
 | Chart data | the numbers of the charts |
 

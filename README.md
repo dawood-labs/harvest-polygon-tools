@@ -292,7 +292,7 @@ The last row is `Totals` (the percentages are computed from the totals).
 | Stats | the table at the finest level, frozen header, filter, Totals row |
 | By `<level>` | the same table summed to each coarser level |
 | Data | one row per unit, report date and measure (Harvested in period, Remaining at date, Total harvested at date, one per other code) |
-| Pivot | a real pivot table on the Stats table: one row per unit of the first level with its lower levels under it; columns = total crop, harvested in each period, total harvested, remaining. The same numbers stay as plain cells with `--no-pivot` |
+| Pivot | a real pivot table on the Stats table: one row per unit of the first level with its lower levels under it; columns = total crop and harvested in each period; the four total columns are in the field list, not ticked. The same numbers stay as plain cells with `--no-pivot` |
 | Chart data | the numbers the charts read |
 | (very hidden) | a machine-readable copy of all numbers; the next run reads only this. Edit the visible sheets freely |
 
