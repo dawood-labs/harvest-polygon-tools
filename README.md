@@ -1,7 +1,8 @@
 # harvest-polygon-tools
 
-Two small Python tools that turn a classified raster into harvest-monitoring polygons.
-They split the work into **remaining cane (81)** and **harvested (82)**.
+Three small Python tools for harvest monitoring.
+Tools 1 and 2 turn a classified raster into polygons of **remaining cane (81)** and **harvested (82)**.
+Tool 3 turns one harvest report into an Excel workbook of statistics per boundary unit.
 
 ## What the two tools do
 
@@ -42,19 +43,19 @@ These tools do the same work with one command each. They are faster and give the
 2. One command:
 
 ```
-pip install numpy rasterio shapely pyogrio pyproj
+pip install numpy rasterio shapely pyogrio pyproj openpyxl
 ```
 
 or `pip install -r requirements.txt`. Shapely must be 2.0 or newer.
 
 3. Optional: `pip install psutil`. The tools then read free memory more exactly.
-4. Download both `.py` files into the **same folder**.
-   Tool 2 imports Tool 1 from its own folder.
+4. Download the `.py` files into the **same folder**.
+   Tools 2 and 3 import Tool 1 from their own folder.
 
 Test the install. You must see a version number and no error:
 
 ```
-python -c "import numpy, rasterio, shapely, pyogrio, pyproj; print(shapely.__version__)"
+python -c "import numpy, rasterio, shapely, pyogrio, pyproj, openpyxl; print(shapely.__version__)"
 ```
 
 ## Quick start
@@ -205,6 +206,100 @@ Test area: a sugarcane area in Kenya. Raster 6,775 x 6,835 cells at 10 m. Field 
   They were not compared with an ArcMap output.
 - With very little free memory (under about 2 GB) the tools can use somewhat more than planned.
 - The tools were checked on one test area.
+
+## Tool 3: harvest_stats_excel.py (statistics workbook)
+
+It reads ONE harvest report (polygons with a class field: 81 remaining, 82 harvested, maybe other codes)
+and a boundary layer. It writes an Excel workbook with the areas per boundary unit.
+For the next report you give it the workbook of the report before. It carries the history forward
+and never computes old reports again. Six reports in a season give six workbooks; each holds
+everything up to its date.
+
+```
+python harvest_stats_excel.py
+```
+
+Questions (Enter keeps the value in [brackets]):
+
+```
+1) Boundary layer (.shp / .gpkg / .geojson):
+   Fields of units.shp:
+   1) name (26 values, e.g. A, B)
+   2) name_2 (8 values, e.g. C, D)
+2) How many levels do you want statistics for? [1]:
+   Field for level 1 (the largest areas):
+   Column title for this level [name_2]:
+   Field for level 2 (inside level 1):
+   Column title for this level [name]:
+3) Harvest report layer of this date (.shp / .gpkg / .geojson):
+   Class field: predicted
+4) Report date (YYYY-MM-DD or DD-MM-YYYY) [2026-01-12]:
+5) Workbook of the previous report (Enter = this is the first report):
+6) Projection used to calculate areas (detected from the data extent):
+   Unit for areas:
+7) Output folder [...]:
+   Output name (saved as .xlsx) [report_stats]:
+Start? [Y/n]:
+```
+
+- Levels are the fields you choose, largest unit first. Each distinct combination of their values is one row.
+  The field name is used in headers, sheet names and charts; a column title replaces it (Enter keeps the name).
+- The class field is `predicted`; without it the tool lists the fields and asks.
+- The date comes from the file name (YYYY-MM-DD) when it has one.
+- With a previous workbook, the level fields, the unit and the projection must be the same as in it.
+
+Flag mode:
+
+```
+python harvest_stats_excel.py --boundary units.shp --levels name_2,name --level-titles "Area,Unit" --report report_2026-01-12.shp --previous report_2025-12-23_stats.xlsx --out report_2026-01-12_stats.xlsx
+```
+
+Other flags: `--date`, `--class-field`, `--unit`, `--utm`, `--no-pivot`, `--boundary-layer`, `--report-layer`.
+
+### Columns of the table
+
+| Column | Meaning |
+|---|---|
+| one column per level | the unit (field values) |
+| Total Crop Area | all codes together at the latest report |
+| Crop Harvested on DD-MM-YYYY | one per report: harvested (82) in that period only = cumulative 82 at that date minus at the report before (first report: the cumulative 82) |
+| `<code>` on DD-MM-YYYY | one per other code of a report (not 81, not 82), right after that report's harvested column; area with that code at that date. Rename the header in Excel if you like; the next workbook keeps your title |
+| Total Harvested Crop (date) | cumulative 82 at the latest report |
+| Total Remaining Crop (date) | total crop minus harvested: every code other than 82 counts as remaining |
+| Total Harvested Crop % / Total Remaining Crop % (date) | share of the total crop; the two add to 100 |
+
+The last row is `Totals` (the percentages are computed from the totals).
+
+### Rules
+
+- Reports must be **cumulative**: every report covers the whole crop area, so each row's total stays the same.
+  A change of more than 0.01 % (and more than 0.01 of the unit) gives a WARNING with the rows.
+  A report whose total looks like only the previous remaining area (an incremental file) is refused.
+- A harvested area that goes down gives a negative period value: it is written as it is, highlighted, with a WARNING.
+- Combinations without crop (zero-area slivers of a GIS intersection) are left out; the result says how many.
+- Crop outside every boundary polygon is kept in a row `(outside the boundary)` (when more than 0.001 of the unit).
+  The table total must equal the report total: the result shows `OK` or `CHECK`.
+- Boundary polygons that overlap: the first polygon in the file keeps the overlap, so crop is counted once (NOTE).
+- A crop polygon inside one boundary polygon is taken whole; only polygons crossing a boundary edge are cut.
+  Dirty shapes are repaired first (NOTE with the counts), as in the other tools.
+- The same date cannot be added twice; a date earlier than the previous report is refused.
+
+### The workbook
+
+| Sheet | What it holds |
+|---|---|
+| Dashboard | title band, five tiles with the key numbers, up to six charts (Excel charts, editable), a summary table of the first level |
+| Stats | the table at the finest level, frozen header, filter, Totals row |
+| By `<level>` | the same table summed to each coarser level |
+| Data | one row per unit, report date and measure (Harvested in period, Remaining at date, Total harvested at date, one per other code) |
+| Pivot | a real pivot table on the Stats table: one row per unit of the first level with its lower levels under it; columns = total crop, harvested in each period, total harvested, remaining. The same numbers stay as plain cells with `--no-pivot` |
+| Chart data | the numbers the charts read |
+| (very hidden) | a machine-readable copy of all numbers; the next run reads only this. Edit the visible sheets freely |
+
+### Limits
+
+- If Excel ever refuses the pivot table, run again with `--no-pivot`: the sheet keeps the same numbers as plain cells.
+- Not tested in LibreOffice or with very large boundary layers (many thousands of units).
 
 ## Running the tests
 

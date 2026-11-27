@@ -28,3 +28,6 @@ venv/
 !tests/**/*.json
 # last-run memory of the tools (one per folder)
 .harvest_tools/
+# workbooks written by the tools (tests make their own at run time)
+*.xlsx
+~$*.xlsx

@@ -3,4 +3,5 @@ rasterio
 shapely>=2.0
 pyogrio
 pyproj
+openpyxl
 # optional: psutil (reads free memory more exactly)
