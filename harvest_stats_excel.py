@@ -125,11 +125,17 @@ def norm_value(v):
 
 
 def code_text(v):
-    """A class code as written in the file: 82, 82.0 -> '82'; text as it is; missing -> '(no value)'."""
+    """A class code as one text: 82, 82.0, '82', ' 82 ', '82.0' -> '82'; other text as it is (stripped);
+    missing -> '(no value)'."""
     v = norm_value(v)
     if v is None or (isinstance(v, str) and not v.strip()):
         return NO_VALUE
-    return str(v).strip() if isinstance(v, str) else str(v)
+    if isinstance(v, str):
+        t = v.strip()
+        if re.fullmatch(r"[+-]?\d+(\.0*)?", t):          # a whole number typed as text, e.g. from a text column
+            return str(int(float(t)))
+        return t
+    return str(v)
 
 
 def clean_text(s, limit=None):
@@ -180,6 +186,8 @@ def unique_headers(names):
 
 
 DATE_ISO = re.compile(r"(?<!\d)(\d{4})[-_.](\d{2})[-_.](\d{2})(?!\d)")
+DATE_DMY = re.compile(r"(?<!\d)(\d{2})[-_.](\d{2})[-_.](\d{4})(?!\d)")
+DATE_COMPACT = re.compile(r"(?<!\d)((?:19|20)\d{2})(\d{2})(\d{2})(?!\d)")
 
 
 def parse_date(text):
@@ -200,13 +208,19 @@ def parse_date(text):
 
 
 def dates_in_name(path):
-    """Valid dates (YYYY-MM-DD) found in a file name, in order, without repeats."""
+    """Valid dates found in a file name, in the order they stand there, without repeats. Three ways of
+    writing are known: 2026-01-15, 15-01-2026 (also with _ or .) and 20260115."""
+    stem = Path(path).stem
+    hits = []
+    for rx, order in ((DATE_ISO, (0, 1, 2)), (DATE_DMY, (2, 1, 0)), (DATE_COMPACT, (0, 1, 2))):
+        for m in rx.finditer(stem):
+            g = m.groups()
+            try:
+                hits.append((m.start(), dt.date(int(g[order[0]]), int(g[order[1]]), int(g[order[2]]))))
+            except ValueError:
+                continue
     out = []
-    for m in DATE_ISO.finditer(Path(path).stem):
-        try:
-            d = dt.date(*(int(x) for x in m.groups()))
-        except ValueError:
-            continue
+    for _, d in sorted(hits):
         if d not in out:
             out.append(d)
     return out
@@ -280,6 +294,16 @@ def read_polygons(path, columns, area_crs, what, assume_crs=None, workers=1, not
     rep = {"unreadable": bad} if bad else {}
     keep = ~shapely.is_missing(g)
     keep[keep] = ~shapely.is_empty(g[keep])
+    if keep.any() and pyproj.CRS(lcrs).is_geographic:
+        x0, y0, x1, y1 = shapely.total_bounds(g[keep])
+        if min(x0, x1) < -360 or max(x0, x1) > 360 or min(y0, y1) < -90.001 or max(y0, y1) > 90.001:
+            why = ("says it is in degrees" if meta.get("crs") else
+                   "has no coordinate system and was taken to be in degrees (WGS 84)")
+            raise UserError(
+                f"the {what} {Path(path).name} {why}, but its coordinates are not degrees (x from {x0:,.0f} to "
+                f"{x1:,.0f}, y from {y0:,.0f} to {y1:,.0f}): they look like metres. Its coordinate system is "
+                f"missing or wrong. Save the layer again with its real coordinate system (in QGIS: Export > Save "
+                f"Features As, CRS = the projected one it was made in).")
     if keep.any() and pyproj.CRS(lcrs) != area_crs:
         g = g.copy()
         g[keep] = pc.project_geoms(g[keep], lcrs, area_crs, workers)
@@ -314,7 +338,28 @@ def boundary_units(path, fields, area_crs, workers=1, notes=None, assume_crs=Non
     parts, prow, data, _ = read_polygons(path, fields, area_crs, "boundary", assume_crs, workers, notes)
     n = len(data[0]) if len(data) else 0
     cols = [np.asarray(c, dtype=object) for c in data]
-    keys = [tuple(norm_value(c[i]) for c in cols) for i in range(n)]
+    first, merged = {}, {}
+
+    def one(v):                                          # 'North', 'North ' and 'north' are one unit
+        v = norm_value(v)
+        if not isinstance(v, str):
+            return v
+        t = " ".join(v.split())
+        if not t:
+            return None
+        known = first.setdefault(t.casefold(), t)
+        if known != t or t != v:
+            merged.setdefault(known, set()).add(v)
+        return known
+    keys = [tuple(one(c[i]) for c in cols) for i in range(n)]
+    twins = {k: v for k, v in merged.items() if len({x.strip() for x in v} | {k}) > 1}
+    if twins and notes is not None:
+        k = sorted(twins, key=str)[0]
+        other = sorted(x.strip() for x in twins[k] if x.strip() != k)[0]
+        note = (f"boundary: {pc.plural(len(twins), 'level value')} written in more than one way (upper / lower "
+                f"case), e.g. '{k}' and '{other}'; each is treated as one unit, named as it is written first.")
+        print(f"NOTE: {note}")
+        notes.append(note)
     uniq = {}
     unit_of_row = np.array([uniq.setdefault(k, len(uniq)) for k in keys], dtype=np.int64)
     unit_keys = list(uniq)
@@ -422,7 +467,64 @@ def plan_parts(report, n_features):
     return parts, {"available": avail, "budget": budget, "need": need}
 
 
-def compute_report(boundary, fields, report, class_field, area_crs, unit, workers=1, notes=None, assume=None):
+def drop_copies(crop, codes):
+    """Exact copies among the report polygons: (keep mask, area dropped, area of copies with another code).
+    A copy with the same class is counted once; a copy with another class is kept (both are counted) and its
+    area is reported, because the tool cannot know which class is right."""
+    n = len(crop)
+    keep = np.ones(n, dtype=bool)
+    if n < 2:
+        return keep, 0.0, 0.0
+    area = shapely.area(crop)
+    key = np.round(np.column_stack([shapely.bounds(crop), area]), 3)
+    _, inv, cnt = np.unique(key, axis=0, return_inverse=True, return_counts=True)
+    inv = np.asarray(inv).ravel()
+    same, other = 0.0, 0.0
+    for g in np.flatnonzero(cnt > 1):
+        idx = np.flatnonzero(inv == g)
+        seen = []
+        for i in idx:
+            twin = next((j for j in seen if shapely.equals(crop[i], crop[j])), None)
+            if twin is None:
+                seen.append(i)
+            elif any(codes[j] == codes[i] and shapely.equals(crop[i], crop[j]) for j in seen):
+                keep[i] = False
+                same += float(area[i])
+            else:
+                seen.append(i)
+                other += float(area[i])
+    return keep, same, other
+
+
+def overlap_inside(crop, workers=1):
+    """Area (m2) that polygons of the report share with each other, found the cheap way: a point inside each
+    polygon is looked up in the other polygons, and the shared area of every pair found is measured. It finds
+    copies, polygons inside others and large overlaps (a thin overlap along an edge can be missed), in a few
+    seconds for half a million polygons."""
+    n = len(crop)
+    if n < 2:
+        return 0.0
+    tree = STRtree(crop)
+    pts = shapely.point_on_surface(crop)
+
+    def chunk(ix):
+        a, b = tree.query(pts[ix], predicate="within")
+        a = ix[a]
+        m = a != b
+        return a[m], b[m]
+    workers = max(1, min(workers, n // 20_000 + 1))
+    with ThreadPoolExecutor(workers) as ex:
+        got = list(ex.map(chunk, pc._chunks(n, workers, 4)))
+    a = np.concatenate([g[0] for g in got])
+    b = np.concatenate([g[1] for g in got])
+    if not len(a):
+        return 0.0
+    pairs = np.unique(np.column_stack([np.minimum(a, b), np.maximum(a, b)]), axis=0)
+    return float(shapely.area(shapely.intersection(crop[pairs[:, 0]], crop[pairs[:, 1]])).sum())
+
+
+def compute_report(boundary, fields, report, class_field, area_crs, unit, workers=1, notes=None, assume=None,
+                   code_map=None):
     """Areas of the report per unit and code, in the unit. Returns dict with values {key: {code: area}},
     outside {code: area}, totals {code: area}, codes (as found in the file), counts. The report is read in
     as many parts as the free memory asks for (plan_parts); the areas of the parts are added up."""
@@ -448,6 +550,7 @@ def compute_report(boundary, fields, report, class_field, area_crs, unit, worker
     outside = np.zeros(0)
     totals = np.zeros(0)
     counts, n_crop = {}, 0
+    dup_same = dup_other = shared = 0.0
     for k in range(n_parts):
         part = None if step is None else (k * step, step)
         crop, crow, data, _ = read_polygons(report, [class_field], area_crs, "report",
@@ -455,6 +558,8 @@ def compute_report(boundary, fields, report, class_field, area_crs, unit, worker
                                             part=part, counts=counts)
         raw = np.asarray(data[0], dtype=object) if len(data) else np.array([], dtype=object)
         row_codes = [code_text(v) for v in raw]
+        if code_map:
+            row_codes = [code_map.get(c, c) for c in row_codes]
         new = sorted(set(row_codes) - set(cidx), key=natural_key)
         if new:                                           # a code first seen in this part: one more column
             for c in new:
@@ -464,6 +569,12 @@ def compute_report(boundary, fields, report, class_field, area_crs, unit, worker
             outside = np.concatenate([outside, np.zeros(len(new))])
             totals = np.concatenate([totals, np.zeros(len(new))])
         codes = np.array([cidx[row_codes[r]] for r in crow], dtype=np.int64) if len(crow) else np.zeros(0, np.int64)
+        keep, d_same, d_other = drop_copies(crop, codes)
+        dup_same += d_same
+        dup_other += d_other
+        if not keep.all():
+            crop, codes = crop[keep], codes[keep]
+        shared += overlap_inside(crop, workers)
         if k == 0:
             many = "" if n_parts == 1 else f" in part 1 of {n_parts}"
             pc.tick(f"{pc.plural(len(crop), 'crop polygon')}{many} and "
@@ -480,6 +591,7 @@ def compute_report(boundary, fields, report, class_field, area_crs, unit, worker
         print(f"NOTE: {note}")
         if notes is not None:
             notes.append(note)
+    land = np.bincount(bunit, weights=shapely.area(bparts), minlength=len(keys)) if len(bparts) else np.zeros(len(keys))
     order = sorted(range(len(found)), key=lambda i: natural_key(found[i]))      # codes in natural order
     found = [found[i] for i in order]
     inside, outside, totals = inside[:, order], outside[order], totals[order]
@@ -491,7 +603,8 @@ def compute_report(boundary, fields, report, class_field, area_crs, unit, worker
     return {"values": values, "outside": {c: float(outside[i]) * f for i, c in enumerate(found) if outside[i] != 0},
             "totals": {c: float(totals[i]) * f for i, c in enumerate(found)}, "codes": found,
             "n_crop": n_crop, "n_features": nfeat, "n_keys": len(keys), "all_keys": keys,
-            "overlap": overlap_m2 * f, "parts": n_parts}
+            "overlap": overlap_m2 * f, "parts": n_parts, "dup_same": dup_same * f, "dup_other": dup_other * f, "shared": shared * f,
+            "too_much": float(np.clip(inside.sum(axis=1) - land - pc.NOISE_M2, 0, None).sum()) * f}
 
 
 # ---------------------------------------------------------------- the hidden data sheet
@@ -691,13 +804,76 @@ def distinct_values(path, field):
     return list(pc.vector_read(p, read_geometry=False, columns=[field])[3][0])
 
 
-def other_codes(report, class_field):
-    """The class codes of the report other than 81 and 82, as texts, in natural order (attributes only)."""
+def report_codes(report, class_field):
+    """Every class code of the report as text, in natural order (attributes only); [] when it cannot be read."""
     try:
-        found = {code_text(v) for v in distinct_values(report, class_field)}
+        return sorted({code_text(v) for v in distinct_values(report, class_field)}, key=natural_key)
     except Exception:
         return []
+
+
+def other_codes(report, class_field, code_map=None):
+    """The class codes of the report other than 81 and 82 (after `code_map`), as texts, in natural order."""
+    found = {(code_map or {}).get(c, c) for c in report_codes(report, class_field)}
     return sorted((c for c in found if c not in (REMAIN, HARVEST)), key=natural_key)
+
+
+KNOWN_HARVESTED = ("332", "215")          # 'harvested' in other code tables of the same family of reports
+KNOWN_REMAINING = ("333",)
+
+
+def make_code_map(harvested=None, remaining=None):
+    """{code in the file: '82' or '81'} from the two optional codes (texts as code_text gives them)."""
+    h = None if harvested in (None, "") else code_text(harvested)
+    r = None if remaining in (None, "") else code_text(remaining)
+    if h is not None and h == r:
+        raise UserError("the harvested class and the remaining class cannot be the same code")
+    out = {}
+    if h not in (None, HARVEST):
+        out[h] = HARVEST
+    if r not in (None, REMAIN):
+        out[r] = REMAIN
+    return out
+
+
+def code_map_text(code_map):
+    names = {HARVEST: "harvested (82)", REMAIN: "remaining cane (81)"}
+    return ", ".join(f"class {c} = {names[t]}" for c, t in sorted(code_map.items(), key=lambda kv: kv[1], reverse=True))
+
+
+def ask_code_map(report, class_field, prev_map=None, given=None):
+    """Question mode: when the report has no class 82, ask which of its classes is harvested (and, without a
+    class 81, which one is remaining cane). A season keeps the answer of its first report."""
+    if prev_map:
+        print(f"   Classes as in the previous workbook: {code_map_text(prev_map)}.")
+        return dict(prev_map)
+    codes = report_codes(report, class_field)
+    cand = [c for c in codes if c not in (REMAIN, HARVEST, NO_VALUE)]
+    if HARVEST in codes or not cand:
+        return {}
+    given = given or {}
+    g_h = next((c for c, t in given.items() if t == HARVEST), None)
+    g_r = next((c for c, t in given.items() if t == REMAIN), None)
+    print(f"   The report has no class 82 (harvested). Its classes: {', '.join(codes)}.")
+
+    def pick(allowed):
+        def check(a):
+            a = code_text(a)
+            if a == "0":
+                return "", None
+            return (a, None) if a in allowed else (None, f"Type one of: {', '.join(allowed)}, or 0.")
+        return check
+    h_def = g_h or next((c for c in KNOWN_HARVESTED if c in cand), "0")
+    h = pc.ask_text("   Which class is harvested? (0 = none: nothing is harvested yet)", h_def, pick(cand))
+    if not h:
+        return {}
+    rest = [c for c in cand if c != h]
+    r = ""
+    if REMAIN not in codes and rest:
+        r_def = g_r or next((c for c in KNOWN_REMAINING if c in rest), rest[0] if len(rest) == 1 else "0")
+        r = pc.ask_text("   Which class is remaining cane? (0 = no single one: every other class is remaining)",
+                        r_def, pick(rest))
+    return make_code_map(h, r or None)
 
 
 def class_name_check(a):
@@ -1198,7 +1374,7 @@ def add_pivot(pv, st, tab, header, rows, hr, pivot_ref, wb):
             continue
         real = [v for v in vals if v is not None]
         blank = len(real) < len(vals)
-        text = not all(isinstance(v, int) and not isinstance(v, bool) for v in real)
+        text = not real or not all(isinstance(v, int) and not isinstance(v, bool) for v in real)
         if text:
             items = sorted({str(v) for v in real}, key=lambda v: (v == OUTSIDE, natural_key(v)))
             si = SharedItems(_fields=[Text(v=v) for v in items] + ([Missing()] if blank else []),
@@ -1866,7 +2042,7 @@ def check_previous(meta, levels, unit, area_crs, date, boundary):
 
 def run(boundary, levels, report, date, out, previous=None, utm=None, unit=None, class_field=None,
         allow_non_utm=False, pivot=True, boundary_layer=None, report_layer=None, workers=None,
-        class_names=None):
+        class_names=None, code_map=None):
     """levels = [{'field': name, 'title': title}] from the largest unit inwards; date = 'YYYY-MM-DD';
     class_names = {code: name} for the codes other than 81 / 82 (a name replaces the code in the headers)."""
     pc.start_clock()
@@ -1909,9 +2085,14 @@ def run(boundary, levels, report, date, out, previous=None, utm=None, unit=None,
         notes.append(f"the report has no coordinate system; it is taken to be {pc.crs_label(bcrs)} like the boundary.")
     for n in notes:
         print(f"NOTE: {n}")
-    bounds = layer_bounds(report) or layer_bounds(boundary)
+    rb, bb = layer_bounds(report), layer_bounds(boundary)
+    bounds = rb or bb
     if bounds is None:
         raise UserError("the report and the boundary layer have no features")
+    pc.check_degrees("report", report.name, rcrs or bcrs, rb, declared=bool(rcrs))
+    pc.check_degrees("boundary layer", boundary.name, bcrs or rcrs, bb, declared=bool(bcrs))
+    if rb is not None and bb is not None:
+        pc.check_same_place("report", report.name, rcrs or bcrs, rb, "boundary layer", boundary.name, bcrs or rcrs, bb)
     area_crs = pc.resolve_area_crs(utm, rcrs or bcrs, bounds, allow_non_utm)
 
     prev_meta, prev_values, labels = None, {}, {}
@@ -1923,6 +2104,12 @@ def run(boundary, levels, report, date, out, previous=None, utm=None, unit=None,
         for n in check_previous(prev_meta, levels, unit, area_crs, date, boundary):
             print(f"NOTE: {n}")
             notes.append(n)
+        prev_map = prev_meta.get("code_map") or {}
+        if code_map and dict(code_map) != dict(prev_map):
+            raise UserError(f"the previous workbook reads the classes as: {code_map_text(prev_map) or '82 = harvested'}"
+                            f"; this run asks for: {code_map_text(code_map)}. The classes must mean the same for "
+                            f"the whole season.")
+        code_map = prev_map
         labels = merge_labels(prev_meta.get("labels"), read_lab)
         for (c, d), text in sorted(read_lab.items()):
             old = {(x["code"], x["date"]): x["text"] for x in prev_meta.get("labels") or []}
@@ -1932,7 +2119,7 @@ def run(boundary, levels, report, date, out, previous=None, utm=None, unit=None,
                 notes.append(n)
 
     if class_names:
-        present = set(other_codes(report, class_field))
+        present = set(other_codes(report, class_field, code_map))
         for c, name in class_names.items():
             c = str(c)
             if c in present:
@@ -1951,7 +2138,7 @@ def run(boundary, levels, report, date, out, previous=None, utm=None, unit=None,
     save_last_run(info)
     try:
         res = _run(boundary, levels, report, date, out, previous, area_crs, unit, class_field, pivot, workers,
-                   prev_meta, prev_values, labels, notes, warns, assume, t0)
+                   prev_meta, prev_values, labels, notes, warns, assume, t0, code_map)
     except KeyboardInterrupt:
         save_last_run(dict(info, status="interrupted"))
         raise
@@ -1963,9 +2150,45 @@ def run(boundary, levels, report, date, out, previous=None, utm=None, unit=None,
 
 
 def _run(boundary, levels, report, date, out, previous, area_crs, unit, class_field, pivot, workers,
-         prev_meta, prev_values, labels, notes, warns, assume, t0):
+         prev_meta, prev_values, labels, notes, warns, assume, t0, code_map=None):
     fields = [lv["field"] for lv in levels]
-    rep = compute_report(boundary, fields, report, class_field, area_crs, unit, workers, notes, assume)
+    code_map = dict(code_map or {})
+    if code_map:
+        n = f"{code_map_text(code_map)} (as chosen for this season)."
+        print(f"NOTE: {n}")
+        notes.append(n)
+    rep = compute_report(boundary, fields, report, class_field, area_crs, unit, workers, notes, assume, code_map)
+    if not rep["n_crop"]:
+        raise UserError(f"the report {report.name} holds no polygon with an area: nothing to count.")
+    if not rep["values"]:
+        raise UserError(
+            f"no crop of the report {report.name} lies inside the boundary layer {boundary.name}: the two files "
+            f"cover different places. Check that they belong to the same area and that both have their real "
+            f"coordinate system.")
+    if rep["dup_same"] > 0:
+        n = (f"the report holds exact copies of polygons with the same class ({pc.area_text(rep['dup_same'], unit)} "
+             f"{unit.text}); each is counted once.")
+        print(f"NOTE: {n}")
+        notes.append(n)
+    if rep["dup_other"] > 0:
+        warn(warns, f"the report holds the same polygon twice with DIFFERENT classes "
+                    f"({pc.area_text(rep['dup_other'], unit)} {unit.text}); both are counted, so that area is in "
+                    f"the table twice. Remove the wrong copy from the report.")
+    if rep["shared"] - rep["dup_other"] > max(0.01, 1e-5 * sum(rep["totals"].values())):
+        warn(warns, f"polygons of the report overlap each other: at least "
+                    f"{pc.area_text(rep['shared'] - rep['dup_other'], unit)} {unit.text} are counted twice (the tool "
+                    f"cannot know which polygon is right). Clean the report so that its polygons do not overlap.")
+    elif rep["too_much"] > 0:
+        warn(warns, f"some boundary units hold more crop than land ({pc.area_text(rep['too_much'], unit)} "
+                    f"{unit.text} too much): polygons of the report overlap each other and are counted twice. "
+                    f"Dissolve or clean the report.")
+    cs = rep["codes"]
+    if HARVEST not in cs:
+        others = [c for c in cs if c not in (REMAIN, HARVEST)]
+        if others:
+            warn(warns, f"the report holds no class 82 (harvested); its classes are {', '.join(cs)}. Every class "
+                        f"other than 82 is counted as remaining, so harvested = 0. If another class means "
+                        f"harvested, run again and name it (question mode asks; flags: --harvested-code).")
     if rep["overlap"] > 0:
         n = (f"boundary polygons overlap each other ({pc.area_text(rep['overlap'], unit)} {unit.text} in all); "
              f"crop there is counted once, for the polygon that comes first in the boundary file.")
@@ -1984,10 +2207,10 @@ def _run(boundary, levels, report, date, out, previous, area_crs, unit, class_fi
         prev_T = sum(prev_tot.values())
         prev_R = prev_T - prev_h
         d_tot, d_rem = abs(file_total - prev_T), abs(file_total - prev_R)
-        if prev_h > 0 and d_tot > 0.01 * prev_T and d_rem < d_tot:
+        if prev_h > 0 and d_tot > 0.05 * prev_T and d_rem < 0.02 * prev_T:
             raise UserError(
                 f"this report looks INCREMENTAL, not cumulative: its total area {pc.area_text(file_total, unit)} "
-                f"{unit.text} is close to the area that was still remaining on {dmy(pd_)} "
+                f"{unit.text} equals (within 2 %) the area that was still remaining on {dmy(pd_)} "
                 f"({pc.area_text(prev_R, unit)}) and not to the total crop area ({pc.area_text(prev_T, unit)}). "
                 f"This tool needs cumulative reports, which cover the whole crop area every time (81 + 82 = the "
                 f"whole crop). Use the cumulative report of {dmy(date)}.")
@@ -2052,7 +2275,7 @@ def _run(boundary, levels, report, date, out, previous, area_crs, unit, class_fi
     meta = {"tool": TOOL, "format_version": FORMAT_VERSION, "unit": unit.key, "crs": crs_text(area_crs),
             "levels": levels, "boundary": file_sig(boundary), "reports": reports,
             "labels": [{"code": c, "date": d, "text": t} for (c, d), t in sorted(labels.items())],
-            "written": time.strftime("%Y-%m-%d %H:%M:%S")}
+            "code_map": code_map, "written": time.strftime("%Y-%m-%d %H:%M:%S")}
     wb, facts = build_workbook(tab, levels, unit, area_crs, meta,
                                {"report": report.name, "boundary": boundary.name},
                                previous.name if previous else None, pivot)
@@ -2357,7 +2580,10 @@ def interactive(defaults):
                     lv["title"] = t
         break
 
-    class_names = ask_class_names(report, class_field, previous, defaults.get("class_names") if edit else None)
+    code_map = ask_code_map(report, class_field, (prev_meta or {}).get("code_map"),
+                            defaults.get("code_map") if edit else None)
+    class_names = ask_class_names(report, class_field, previous, defaults.get("class_names") if edit else None,
+                                  code_map)
 
     rcrs = layer_crs(report) or layer_crs(boundary)
     if not rcrs:
@@ -2420,6 +2646,8 @@ def interactive(defaults):
         t = f" (column title '{lv['title']}')" if lv["title"] != lv["field"] else ""
         print(f"  level {i}     : {lv['field']}{t}")
     print(f"  report      : {report}{rl}\n  class field : {class_field}\n  report date : {dmy(date)}")
+    if code_map:
+        print(f"  classes     : {code_map_text(code_map)}")
     for c, name in class_names.items():
         print(f"  class {c:<6}: " + (f"named '{name}'" if name != c else "keeps its code as the name"))
     print(f"  previous    : {previous if previous else 'none (first report)'}")
@@ -2434,17 +2662,17 @@ def interactive(defaults):
         raise pc.EditAnswers(dict(edit=True, boundary=str(boundary), report=str(report), levels=levels,
                                   utm=crs_text(utm), unit=unit.key, class_field=class_field, date=date,
                                   previous=str(previous) if previous else None, class_names=class_names,
-                                  out_edit=str(out)))
+                                  out_edit=str(out), code_map=code_map))
     return dict(boundary=boundary, levels=levels, report=report, date=date, out=out, previous=previous, utm=utm,
                 unit=unit, class_field=class_field, allow_non_utm=allow, boundary_layer=b_layer, report_layer=r_layer,
-                class_names=class_names)
+                class_names=class_names, code_map=code_map)
 
 
-def ask_class_names(report, class_field, previous, given=None):
+def ask_class_names(report, class_field, previous, given=None, code_map=None):
     """Ask a name for every class code other than 81 / 82 (Enter keeps the name typed just before, else the
     name used in the previous workbook, else the code)."""
     names = {}
-    others = other_codes(report, class_field)
+    others = other_codes(report, class_field, code_map)
     if not others:
         return names
     known = {}
@@ -2502,7 +2730,8 @@ def next_report(last):
                                  given.get("report"), pc._file_check(pc.VECTOR_EXTS, "report layer"))
             sig = file_sig(report)
             if any(isinstance(r.get("file"), dict) and r["file"].get("name") == sig.get("name")
-                   and r["file"].get("size") == sig.get("size") for r in meta["reports"]):
+                   and r["file"].get("size") == sig.get("size") and r["file"].get("mtime") == sig.get("mtime")
+                   for r in meta["reports"]):
                 print("   That report is already in the workbook. Give the report of the new date.")
                 given.pop("report", None)
                 continue
@@ -2529,7 +2758,7 @@ def next_report(last):
         if ddef and ddef <= dates[-1]:
             ddef = None
         date = pc.ask_text("2) Report date (YYYY-MM-DD or DD-MM-YYYY)", ddef, d_check).isoformat()
-        class_names = ask_class_names(report, class_field, prev, given.get("class_names"))
+        class_names = ask_class_names(report, class_field, prev, given.get("class_names"), meta.get("code_map"))
         if given.get("out"):
             out = ask_out(Path(given["out"]).parent, Path(given["out"]).stem, prev, label="3) Output folder")
         else:
@@ -2603,6 +2832,9 @@ def main(argv=None):
     ap.add_argument("--report", help="harvest report of this date (.shp, .gpkg, .geojson or .json)")
     ap.add_argument("--report-layer", default=None, help="layer of the report file when it has several")
     ap.add_argument("--class-field", default=None, help="class field of the report (default: predicted)")
+    ap.add_argument("--harvested-code", default=None, help="the class that means harvested when it is not 82 "
+                    "(first report of a season; later reports take it from the previous workbook)")
+    ap.add_argument("--remaining-code", default=None, help="the class that means remaining cane when it is not 81")
     ap.add_argument("--class-names", default=None, help="names for class codes other than 81 and 82, used in the "
                     "column headers: 282=Cloud,232=Smoke (default: the code itself)")
     ap.add_argument("--date", default=None, help="report date YYYY-MM-DD or DD-MM-YYYY (default: from the file name)")
@@ -2661,7 +2893,7 @@ def main(argv=None):
     else:
         found = dates_in_name(report)
         if not found:
-            ap.error("--date is needed: the report file name holds no date (YYYY-MM-DD)")
+            ap.error("--date is needed: the report file name holds no date (e.g. 2026-01-15, 15-01-2026 or 20260115)")
         if len(found) > 1:
             ap.error(f"--date is needed: the report file name holds {len(found)} dates "
                      f"({', '.join(x.isoformat() for x in found)})")
@@ -2688,7 +2920,7 @@ def main(argv=None):
         res = run(Path(pc.clean_path(a.boundary)), levels, report, d.isoformat(), out,
                   Path(pc.clean_path(a.previous)) if a.previous else None, utm, unit, a.class_field,
                   a.allow_non_utm, not a.no_pivot, a.boundary_layer, a.report_layer, a.workers,
-                  parse_class_names(a.class_names))
+                  parse_class_names(a.class_names), make_code_map(a.harvested_code, a.remaining_code))
         if res and not res["check_ok"]:
             sys.exit(3)
     except UserError as e:

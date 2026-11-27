@@ -747,11 +747,33 @@ def run(final, l1_path, out, sliver_acres=0.2, rule=True, utm=None, classes="bot
             pc.vector_info(p)
         except Exception as e:
             raise UserError(f"cannot read the {what} layer {p}: {e}")
+    try:                                   # a class field in the checked layer: every polygon is still remaining
+        names = [str(n) for n in pc.vector_info(final).get("fields", [])]
+        cf = next((n for n in names if n.casefold() == "predicted"), None)
+        if cf:
+            vals = pc.vector_read(final, read_geometry=False, columns=[cf])[3][0]
+            other = [v for v in vals if v is not None and str(v).strip() not in ("81", "81.0", "")]
+            if other:
+                kinds = sorted({str(v).strip() for v in other})[:5]
+                print(f"WARNING: the FINAL layer has a field '{cf}' with {pc.plural(len(other), 'polygon')} that "
+                      f"{'is' if len(other) == 1 else 'are'} not 81 (found: {', '.join(kinds)}). This tool takes EVERY "
+                      f"polygon of the FINAL layer as remaining cane, whatever that field says. If those polygons "
+                      f"are harvested, delete them from the FINAL layer and run again.")
+    except UserError:
+        raise
+    except Exception:
+        pass
     wcrs = working_crs(final, l1_path, assume_crs)
     bounds = l1_bounds(l1_path)
     if bounds is None:
         raise UserError("the L1 layer has no polygons")
     lcrs = layer_crs(l1_path) or wcrs
+    fcrs = layer_crs(final) or wcrs
+    fb = l1_bounds(final)
+    pc.check_degrees("L1 layer", l1_path.name, lcrs, bounds, declared=bool(layer_crs(l1_path)))
+    if fb is not None:
+        pc.check_degrees("FINAL layer", final.name, fcrs, fb, declared=bool(layer_crs(final)))
+        pc.check_same_place("FINAL layer", final.name, fcrs, fb, "L1 layer", l1_path.name, lcrs, bounds)
     area_crs = pc.resolve_area_crs(utm, lcrs, bounds, allow_non_utm)
     bad = pc.locked_outputs(out)
     if bad:

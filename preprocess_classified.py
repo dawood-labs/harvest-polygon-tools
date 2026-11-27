@@ -1106,6 +1106,62 @@ def polygon_layers(layers):
                                                                                "geometrycollection")]
 
 
+_LAYER_ROLE = {}         # file -> (input it was chosen for, layer): two inputs cannot be two layers of one file
+
+
+def _one_role(path, what, layer):
+    """Refuse a second input that is another layer of a file already in use (the chosen layer is remembered
+    per file, so both inputs would be read from the same layer)."""
+    key = _layer_key(path)
+    was = _LAYER_ROLE.get(key)
+    if was and was[0] != what and was[1] != layer:
+        raise UserError(
+            f"{Path(path).name} is given twice: layer '{was[1]}' as the {was[0]} and layer '{layer}' as the {what}. "
+            f"This tool needs its inputs as separate files: save one of the two layers as its own file "
+            f"(in QGIS: right-click the layer > Export > Save Features As) and give that file.")
+    _LAYER_ROLE[key] = (what, layer)
+
+
+def check_degrees(what, name, crs, bounds, declared=True):
+    """Stop when a layer said (or taken) to be in degrees holds coordinates that cannot be degrees."""
+    if crs is None or bounds is None or not pyproj.CRS(crs).is_geographic:
+        return
+    x0, y0, x1, y1 = (float(v) for v in bounds)
+    if min(x0, x1) < -360 or max(x0, x1) > 360 or min(y0, y1) < -90.001 or max(y0, y1) > 90.001:
+        why = "says it is in degrees" if declared else "has no coordinate system and was taken to be in degrees"
+        raise UserError(
+            f"the {what} {name} {why}, but its coordinates are not degrees (x from {x0:,.0f} to {x1:,.0f}, "
+            f"y from {y0:,.0f} to {y1:,.0f}): they look like metres. Its coordinate system is missing or wrong. "
+            f"Save the layer again with its real coordinate system (in QGIS: Export > Save Features As, CRS = the "
+            f"projected one it was made in).")
+
+
+def lonlat_box(crs, bounds):
+    """A bounding box as (west, south, east, north) in degrees; None when it cannot be transformed."""
+    try:
+        tr = pyproj.Transformer.from_crs(pyproj.CRS(crs), pyproj.CRS(4326), always_xy=True)
+        box = tr.transform_bounds(*[float(v) for v in bounds], densify_pts=21)
+        return box if all(math.isfinite(v) for v in box) else None
+    except Exception:
+        return None
+
+
+def check_same_place(what_a, name_a, crs_a, bounds_a, what_b, name_b, crs_b, bounds_b):
+    """Stop when two inputs do not even share their bounding boxes: nothing could come out, and the usual
+    reason is another area or a wrong coordinate system."""
+    a, b = lonlat_box(crs_a, bounds_a), lonlat_box(crs_b, bounds_b)
+    if a is None or b is None:
+        return
+    if a[2] < a[0] or b[2] < b[0]:                      # a box that crosses the 180 degree meridian: not judged
+        return
+    if a[0] > b[2] or b[0] > a[2] or a[1] > b[3] or b[1] > a[3]:
+        def where(q):
+            return f"longitude {q[0]:.3f} to {q[2]:.3f}, latitude {q[1]:.3f} to {q[3]:.3f}"
+        raise UserError(
+            f"the {what_a} and the {what_b} do not cover the same place. {name_a}: {where(a)}. {name_b}: "
+            f"{where(b)}. One of them belongs to another area, or its coordinate system is missing or wrong.")
+
+
 def choose_layer(path, layer=None, what="L1", flag="--l1-layer"):
     """Pick the layer of an input file and remember it for every later read. One layer: that one.
     Several: the given name; else the only polygon layer; else UserError listing the layers."""
@@ -1118,6 +1174,7 @@ def choose_layer(path, layer=None, what="L1", flag="--l1-layer"):
         if layer not in names:
             raise UserError(f"the {what} file {Path(path).name} has no layer '{layer}'; its layers: "
                             + ", ".join(names))
+        _one_role(path, what, layer)
         if len(names) > 1:
             _LAYERS[key] = layer
         else:
@@ -1125,9 +1182,11 @@ def choose_layer(path, layer=None, what="L1", flag="--l1-layer"):
         return layer
     if len(layers) == 1:
         _LAYERS.pop(key, None)
+        _one_role(path, what, names[0])
         return names[0]
     polys = polygon_layers(layers)
     if len(polys) == 1:
+        _one_role(path, what, polys[0][0])
         _LAYERS[key] = polys[0][0]
         return polys[0][0]
     raise UserError(f"the {what} file {Path(path).name} has {len(layers)} layers: "
@@ -1161,6 +1220,7 @@ def ask_layer(path, what="L1"):
             return a, None
         return None, f"Type a number from 1 to {len(layers)} or a layer name."
     name = ask_text(f"   Which layer is the {what}", str(first), check)
+    _one_role(path, what, name)
     _LAYERS[key] = name
     return name
 
@@ -3520,6 +3580,17 @@ def run(raster, l1_path, out, min_acres=0.2, utm=None, cane_value=1, workers=Non
     if not l1crs and not assume_l1_crs:
         raise UserError("the L1 layer has no coordinate system (.prj missing). Add one, or add --assume-l1-crs "
                         "to treat it as being in the raster's coordinate system")
+    check_degrees("raster", Path(raster).name, crs, bounds)
+    try:
+        lb = np.asarray(vector_bounds(l1_path)[1]).T
+        lb = lb[np.isfinite(lb).all(axis=1)] if len(lb) else lb
+    except Exception:
+        lb = np.zeros((0, 4))
+    if len(lb):
+        l1_box = (lb[:, 0].min(), lb[:, 1].min(), lb[:, 2].max(), lb[:, 3].max())
+        check_degrees("L1 layer", Path(l1_path).name, l1crs or crs, l1_box, declared=bool(l1crs))
+        check_same_place("raster", Path(raster).name, crs, bounds, "L1 layer", Path(l1_path).name, l1crs or crs,
+                         l1_box)
     utm_crs = resolve_area_crs(utm, crs, bounds, allow_non_utm)
     bad = locked_outputs(out)
     if bad:

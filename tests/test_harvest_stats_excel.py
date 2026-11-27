@@ -1087,3 +1087,114 @@ def test_output_open_in_excel_stops_early(tmp_path):
     (tmp_path / "~$s.xlsx").write_bytes(b"x")
     with pytest.raises(pc.UserError, match="is open in another program"):
         run(tmp_path, bp, ["region"], rp, "2026-01-10", "s.xlsx")
+
+
+# ---------------------------------------------------------------- new places, names and codes (not the test data's habits)
+def test_codes_and_dates_written_in_other_ways():
+    for v in (82, 82.0, "82", " 82 ", "82.0", "82.00", np.int64(82), np.float32(82)):
+        assert hs.code_text(v) == "82", v
+    assert hs.code_text("82a") == "82a" and hs.code_text("8.5") == "8.5" and hs.code_text(None) == hs.NO_VALUE
+    iso = [d.isoformat() for d in hs.dates_in_name("HM_2026-01-15_x.shp")]
+    assert iso == ["2026-01-15"]
+    assert [d.isoformat() for d in hs.dates_in_name("HM 15-01-2026 final.shp")] == ["2026-01-15"]
+    assert [d.isoformat() for d in hs.dates_in_name("HM_20260115_v2.shp")] == ["2026-01-15"]
+    assert [d.isoformat() for d in hs.dates_in_name("Scan_2025-10-22_HM_15-01-2026.shp")] == ["2025-10-22", "2026-01-15"]
+    assert hs.dates_in_name("report_v2_final.shp") == [] and hs.dates_in_name("id_1234567890.shp") == []
+    assert hs.dates_in_name("x_31-02-2026.shp") == []                      # not a real date
+
+
+def test_another_code_table_needs_the_harvested_class(tmp_path):
+    bp = boundary(tmp_path / "b.gpkg")
+    crops = crop_squares()
+    as82 = harvest_classes(crops, step_rule(700))
+    other = [332 if c == 82 else 333 for c in as82]
+    r_std = report(tmp_path / "std.gpkg", crops, as82)
+    r_oth = report(tmp_path / "other.gpkg", crops, other)
+    _, _, o_std = run(tmp_path, bp, ["region", "block"], r_std, "2026-01-10", "std.xlsx")
+    _, txt, o_plain = run(tmp_path, bp, ["region", "block"], r_oth, "2026-01-10", "plain.xlsx")
+    assert "the report holds no class 82 (harvested); its classes are 332, 333." in " ".join(txt.split())
+    h, rows, _ = stats_table(o_plain)
+    assert rows[-1][h.index("Total Harvested Crop (10-01-2026)")] == 0
+    _, txt, o_map = run(tmp_path, bp, ["region", "block"], r_oth, "2026-01-10", "mapped.xlsx",
+                        code_map=hs.make_code_map("332", "333"))
+    assert "class 332 = harvested (82), class 333 = remaining cane (81)" in " ".join(txt.split())
+    assert "holds no class 82" not in txt
+    assert [r[2:] for r in stats_table(o_map)[1]] == [r[2:] for r in stats_table(o_std)[1]]      # same table
+    assert stats_table(o_map)[0] == stats_table(o_std)[0]                    # no '332 on ...' column
+    # the season keeps the meaning: the next report needs no option, another meaning is refused
+    r2 = report(tmp_path / "other2.gpkg", crops, [332 if c == 82 else 333 for c in harvest_classes(crops, step_rule(900))])
+    _, _, o2 = run(tmp_path, bp, ["region", "block"], r2, "2026-01-20", "mapped2.xlsx", o_map)
+    meta, _ = hidden(o2)
+    assert meta["code_map"] == {"332": "82", "333": "81"}
+    h2, rows2, _ = stats_table(o2)
+    assert rows2[-1][h2.index("Crop Harvested on 20-01-2026")] > 0
+    with pytest.raises(hs.UserError, match="must mean the same for the whole season"):
+        run(tmp_path, bp, ["region", "block"], r2, "2026-01-20", "bad.xlsx", o_map, code_map=hs.make_code_map("333"))
+    with pytest.raises(hs.UserError, match="cannot be the same code"):
+        hs.make_code_map("5", "5.0")
+
+
+def test_copies_and_overlaps_inside_the_report(tmp_path):
+    bp = boundary(tmp_path / "b.gpkg")
+    crops = crop_squares()
+    classes = harvest_classes(crops, step_rule(700))
+    _, _, o0 = run(tmp_path, bp, ["region", "block"], report(tmp_path / "r0.gpkg", crops, classes), "2026-01-10", "r0.xlsx")
+    base = stats_table(o0)[1]
+    # the same polygons twice with the same class: counted once, with a note
+    _, txt, o1 = run(tmp_path, bp, ["region", "block"],
+                     report(tmp_path / "r1.gpkg", list(crops) + list(crops[:50]), list(classes) + list(classes[:50])),
+                     "2026-01-10", "r1.xlsx")
+    assert "exact copies of polygons with the same class" in txt and "counted once" in txt
+    for a, b in zip(base, stats_table(o1)[1]):
+        assert a[:2] == b[:2] and all(close(x, y, 1e-9) for x, y in zip(a[2:], b[2:]) if x is not None)
+    # a copy with the other class, and a polygon shifted over its neighbours: warned, numbers left as they are
+    flipped = [81 if c == 82 else 82 for c in classes[:5]]
+    _, txt, _ = run(tmp_path, bp, ["region", "block"],
+                    report(tmp_path / "r2.gpkg", list(crops) + list(crops[:5]), list(classes) + flipped),
+                    "2026-01-10", "r2.xlsx")
+    assert "same polygon twice with DIFFERENT classes" in txt
+    moved = [shapely.affinity.translate(g, 40, 0) for g in crops[:20]]
+    _, txt, _ = run(tmp_path, bp, ["region", "block"],
+                    report(tmp_path / "r3.gpkg", list(crops) + moved, list(classes) + list(classes[:20])),
+                    "2026-01-10", "r3.xlsx")
+    assert "polygons of the report overlap each other: at least" in " ".join(txt.split())
+    assert "overlap each other: at least" not in " ".join(run(tmp_path, bp, ["region", "block"], tmp_path / "r0.gpkg",
+                                                               "2026-01-10", "again.xlsx")[1].split())
+
+
+def test_inputs_from_other_places_or_without_real_coordinates(tmp_path):
+    bp = boundary(tmp_path / "b.gpkg")
+    crops = crop_squares()
+    classes = harvest_classes(crops, step_rule(700))
+    far = [shapely.affinity.translate(g, 300_000, 0) for g in crops]
+    with pytest.raises(hs.UserError, match="do not cover the same place"):
+        run(tmp_path, bp, ["region", "block"], report(tmp_path / "far.gpkg", far, classes), "2026-01-10", "far.xlsx")
+    # metre coordinates in a GeoJSON without a coordinate system (read as degrees by the format's rule)
+    gj = tmp_path / "metres.geojson"
+    feats = [{"type": "Feature", "properties": {"predicted": int(c)}, "geometry": shapely.geometry.mapping(g)}
+             for g, c in zip(crops[:30], classes[:30])]
+    gj.write_text(json.dumps({"type": "FeatureCollection", "features": feats}))
+    with pytest.raises(hs.UserError, match="its coordinates are not degrees"):
+        run(tmp_path, bp, ["region", "block"], gj, "2026-01-10", "gj.xlsx")
+    pc.check_degrees("layer", "ok.shp", "EPSG:4326", (68.1, 25.2, 68.9, 25.9))          # real degrees: silent
+    pc.check_degrees("layer", "ok.shp", "EPSG:32642", (400000, 2800000, 450000, 2850000))   # metres in a metre CRS
+    # an empty report, and levels typed in different cases
+    with pytest.raises(hs.UserError):
+        run(tmp_path, bp, ["region", "block"], report(tmp_path / "none.gpkg", [], []), "2026-01-10", "none.xlsx")
+    odd = write(tmp_path / "odd.gpkg", UNIT_BOXES, {"region": ["North", "north ", "South", "SOUTH"],
+                                                    "block": ["Block 1", "Block 2", "Block 1", "Block 2"]})
+    _, txt, oo = run(tmp_path, odd, ["region"], report(tmp_path / "r.gpkg", crops, classes), "2026-01-10", "odd.xlsx")
+    assert "written in more than one way" in txt
+    assert [r[0] for r in stats_table(oo)[1]] == ["North", "South", "Totals"]
+
+
+def test_two_layers_of_one_file_are_refused(tmp_path):
+    import geopandas as gpd
+    crops = crop_squares()
+    f = tmp_path / "all.gpkg"
+    gpd.GeoDataFrame({"region": LEVEL1, "block": LEVEL2}, geometry=UNIT_BOXES, crs=CRS).to_file(f, layer="units", driver="GPKG")
+    gpd.GeoDataFrame({"predicted": harvest_classes(crops, step_rule(700))}, geometry=list(crops), crs=CRS).to_file(
+        f, layer="report", driver="GPKG")
+    with pytest.raises(hs.UserError, match="is given twice"):
+        hs.run(f, [{"field": "region", "title": "region"}], f, "2026-01-10", tmp_path / "x.xlsx",
+               boundary_layer="units", report_layer="report", utm="EPSG:32631")
