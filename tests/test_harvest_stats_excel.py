@@ -456,6 +456,49 @@ def test_distinct_codes_read_from_the_attribute_file(tmp_path):
     assert hs.other_codes(tmp_path / "r_shp.shp", "no_such_field") == []
 
 
+def test_report_read_in_parts_gives_the_same_numbers(tmp_path, monkeypatch):
+    bp = boundary(tmp_path / "b.gpkg")
+    crops = crop_squares()
+    classes = harvest_classes(crops, step_rule(700, lambda x, y: 282 if 1500 < y < 1800 and 300 < x < 1300 else None))
+    outs = {}
+    for ext in (".shp", ".gpkg", ".geojson"):
+        rp = report(tmp_path / f"r_{ext[1:]}_2026-01-10{ext}", crops, classes)
+        monkeypatch.delenv(hs.PARTS_ENV, raising=False)
+        res1, txt1, o1 = run(tmp_path, bp, ["region", "block"], rp, "2026-01-10", f"one{ext}.xlsx")
+        assert "it is read in" not in txt1                # a small report fits: read at once
+        monkeypatch.setenv(hs.PARTS_ENV, "7")
+        res7, txt7, o7 = run(tmp_path, bp, ["region", "block"], rp, "2026-01-10", f"seven{ext}.xlsx")
+        assert "so it is read in 7 parts" in txt7 and "in part 1 of 7" in txt7
+        (_, v1), (_, v7) = hidden(o1), hidden(o7)
+        assert v1.keys() == v7.keys()
+        for k in v1:
+            assert v1[k].keys() == v7[k].keys()
+            for d in v1[k]:
+                assert v1[k][d].keys() == v7[k][d].keys()
+                for c in v1[k][d]:
+                    assert close(v1[k][d][c], v7[k][d][c], 1e-9)
+        outs[ext] = v7
+        assert txt7.count("NOTE: report:") == txt1.count("NOTE: report:")       # one note for all the parts
+
+
+def test_parts_follow_the_free_memory(tmp_path, monkeypatch):
+    monkeypatch.delenv(hs.PARTS_ENV, raising=False)
+    f = tmp_path / "big.gpkg"
+    f.write_bytes(b"0" * 1_000_000)                       # 1 MB file -> about 12 MB needed at once
+    gb = 1024 ** 3
+    monkeypatch.setattr(pc, "available_memory", lambda: 8 * gb)
+    assert hs.plan_parts(f, 500_000)[0] == 1
+    monkeypatch.setattr(hs, "report_size", lambda p: 1 * gb)                 # 12 GB needed
+    parts, mem = hs.plan_parts(f, 5_000_000)
+    assert mem["budget"] == 7 * gb and parts == 2          # 8 GB free, 1 GB kept for other programs
+    monkeypatch.setattr(pc, "available_memory", lambda: 2.5 * gb)
+    parts, mem = hs.plan_parts(f, 5_000_000)
+    assert mem["budget"] == 2 * gb and parts == 6          # the user's example: 2.5 GB free -> 2 GB used
+    monkeypatch.setattr(pc, "available_memory", lambda: 0.3 * gb)
+    assert hs.plan_parts(f, 5_000_000)[0] == 48            # almost nothing free: many small parts, no crash
+    assert hs.plan_parts(f, 3000)[0] == 1                  # never parts of a few features
+
+
 def test_negative_period_written_and_warned(tmp_path):
     bp = boundary(tmp_path / "b.gpkg")
     crops = crop_squares()

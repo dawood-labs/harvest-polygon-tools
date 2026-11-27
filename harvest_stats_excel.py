@@ -259,11 +259,14 @@ def field_list_lines(fields):
     return lines
 
 
-def read_polygons(path, columns, area_crs, what, assume_crs=None, workers=1, notes=None):
+def read_polygons(path, columns, area_crs, what, assume_crs=None, workers=1, notes=None, part=None, counts=None):
     """(polygons in area_crs, row of each polygon, column arrays, layer crs) of a vector layer; dirty shapes
-    repaired (pc.clean_polygons) and one NOTE with the counts."""
+    repaired (pc.clean_polygons) and one NOTE with the counts. part = (first feature, number of features)
+    reads only that slice; with `counts` (a dict) the repair counts are added to it and no NOTE is printed
+    (the caller prints one for all the parts)."""
+    kw = {} if part is None else {"skip_features": int(part[0]), "max_features": int(part[1])}
     try:
-        meta, _, wkb, data = pc.vector_read(path, read_geometry=True, columns=list(columns))
+        meta, _, wkb, data = pc.vector_read(path, read_geometry=True, columns=list(columns), **kw)
     except UserError:
         raise
     except Exception as e:
@@ -281,6 +284,10 @@ def read_polygons(path, columns, area_crs, what, assume_crs=None, workers=1, not
         g = g.copy()
         g[keep] = pc.project_geoms(g[keep], lcrs, area_crs, workers)
     parts, prow = pc.clean_polygons(g, workers, rep)
+    if counts is not None:
+        for k, v in rep.items():
+            counts[k] = counts.get(k, 0) + v
+        return parts, prow, data, lcrs
     note = pc.input_note(what, rep)
     if note and notes is not None:
         print(f"NOTE: {note}")
@@ -389,35 +396,102 @@ def assign_areas(crop, codes, bparts, bunit, n_units, n_codes, workers=1):
     return inside, outside
 
 
+PARTS_ENV = "HARVEST_STATS_PARTS"          # force the number of parts the report is read in (tests)
+NEED_FACTOR = {".geojson": 8.0, ".json": 8.0}      # memory needed at once = file size x factor ...
+NEED_FACTOR_DEFAULT = 12.0                         # ... measured: a 133 MB shapefile peaks at 1.4 GB
+
+
+def report_size(path):
+    p = Path(path)
+    files = pc.file_set(p, (".shp", ".dbf")).values() if p.suffix.lower() == ".shp" else [p]
+    return sum(q.stat().st_size for q in files if q.exists())
+
+
+def plan_parts(report, n_features):
+    """How many parts to read the report in so that it fits the free memory: (parts, facts for the note).
+    The machine is read now: memory available minus the buffer kept for other programs (the rule of the
+    other tools: 20 % of it, between 0.5 and 1 GB). A report that fits is read at once."""
+    avail = pc.available_memory()
+    budget = max(avail - pc.memory_buffer_bytes(None, available=avail), 256 * 1024 ** 2)
+    need = report_size(report) * NEED_FACTOR.get(Path(report).suffix.lower(), NEED_FACTOR_DEFAULT)
+    parts = max(1, math.ceil(need / budget))
+    parts = max(1, min(parts, max(1, n_features // 2000)))        # never parts of a few features
+    forced = os.environ.get(PARTS_ENV, "").strip()
+    if forced.isdigit() and int(forced) > 0:
+        parts = max(1, min(int(forced), max(1, n_features)))
+    return parts, {"available": avail, "budget": budget, "need": need}
+
+
 def compute_report(boundary, fields, report, class_field, area_crs, unit, workers=1, notes=None, assume=None):
     """Areas of the report per unit and code, in the unit. Returns dict with values {key: {code: area}},
-    outside {code: area}, totals {code: area}, codes (as found in the file), counts."""
+    outside {code: area}, totals {code: area}, codes (as found in the file), counts. The report is read in
+    as many parts as the free memory asks for (plan_parts); the areas of the parts are added up."""
     pc.tick("reading the boundary layer")
     bparts, bunit, keys, overlap_m2, nfeat = boundary_units(boundary, fields, area_crs, workers, notes,
                                                             assume.get("boundary") if assume else None)
     pc.tick(f"reading the report ({Path(report).name})")
-    crop, crow, data, _ = read_polygons(report, [class_field], area_crs, "report", assume.get("report") if assume else None,
-                                        workers, notes)
-    raw = np.asarray(data[0], dtype=object) if len(data) else np.array([], dtype=object)
-    row_codes = [code_text(v) for v in raw]
-    found = sorted(set(row_codes), key=natural_key)
-    cidx = {c: i for i, c in enumerate(found)}
-    codes = np.array([cidx[row_codes[r]] for r in crow], dtype=np.int64) if len(crow) else np.zeros(0, np.int64)
-    pc.tick(f"{pc.plural(len(crop), 'crop polygon')} and {pc.plural(len(bparts), 'boundary polygon')}: "
-            f"assigning areas")
-    inside, outside = assign_areas(crop, codes, bparts, bunit, len(keys), len(found), workers)
+    try:
+        n_rows = int(pc.vector_info(report).get("features") or 0)
+    except Exception:
+        n_rows = 0
+    n_parts, mem = plan_parts(report, n_rows)
+    gb = 1024 ** 3
+    if n_parts > 1:
+        n = (f"memory: {mem['available'] / gb:.1f} GB free; the report would need about {mem['need'] / gb:.1f} GB "
+             f"at once, so it is read in {n_parts} parts (same result, a little slower).")
+        print(f"NOTE: {n}")
+        if notes is not None:
+            notes.append(n)
+    step = math.ceil(n_rows / n_parts) if n_parts > 1 else None
+    found, cidx = [], {}
+    inside = np.zeros((len(keys), 0))
+    outside = np.zeros(0)
+    totals = np.zeros(0)
+    counts, n_crop = {}, 0
+    for k in range(n_parts):
+        part = None if step is None else (k * step, step)
+        crop, crow, data, _ = read_polygons(report, [class_field], area_crs, "report",
+                                            assume.get("report") if assume else None, workers, notes,
+                                            part=part, counts=counts)
+        raw = np.asarray(data[0], dtype=object) if len(data) else np.array([], dtype=object)
+        row_codes = [code_text(v) for v in raw]
+        new = sorted(set(row_codes) - set(cidx), key=natural_key)
+        if new:                                           # a code first seen in this part: one more column
+            for c in new:
+                cidx[c] = len(found)
+                found.append(c)
+            inside = np.hstack([inside, np.zeros((len(keys), len(new)))])
+            outside = np.concatenate([outside, np.zeros(len(new))])
+            totals = np.concatenate([totals, np.zeros(len(new))])
+        codes = np.array([cidx[row_codes[r]] for r in crow], dtype=np.int64) if len(crow) else np.zeros(0, np.int64)
+        if k == 0:
+            many = "" if n_parts == 1 else f" in part 1 of {n_parts}"
+            pc.tick(f"{pc.plural(len(crop), 'crop polygon')}{many} and "
+                    f"{pc.plural(len(bparts), 'boundary polygon')}: assigning areas")
+        ins, out = assign_areas(crop, codes, bparts, bunit, len(keys), len(found), workers)
+        inside += ins
+        outside += out
+        if len(crop):
+            np.add.at(totals, codes, shapely.area(crop))
+        n_crop += int(len(crop))
+        del crop, crow, data, raw, row_codes, codes, ins, out
+    note = pc.input_note("report", counts)
+    if note:
+        print(f"NOTE: {note}")
+        if notes is not None:
+            notes.append(note)
+    order = sorted(range(len(found)), key=lambda i: natural_key(found[i]))      # codes in natural order
+    found = [found[i] for i in order]
+    inside, outside, totals = inside[:, order], outside[order], totals[order]
     f = 1.0 / unit.m2
     values = {}
     for u, k in enumerate(keys):
         if inside[u].any():
             values[k] = {c: float(inside[u, i]) * f for i, c in enumerate(found) if inside[u, i] != 0}
-    totals = np.zeros(len(found))
-    if len(crop):
-        np.add.at(totals, codes, shapely.area(crop))
     return {"values": values, "outside": {c: float(outside[i]) * f for i, c in enumerate(found) if outside[i] != 0},
             "totals": {c: float(totals[i]) * f for i, c in enumerate(found)}, "codes": found,
-            "n_crop": int(len(crop)), "n_features": nfeat, "n_keys": len(keys), "all_keys": keys,
-            "overlap": overlap_m2 * f}
+            "n_crop": n_crop, "n_features": nfeat, "n_keys": len(keys), "all_keys": keys,
+            "overlap": overlap_m2 * f, "parts": n_parts}
 
 
 # ---------------------------------------------------------------- the hidden data sheet

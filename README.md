@@ -257,6 +257,10 @@ python harvest_stats_excel.py --boundary units.shp --levels name_2,name --level-
 
 Other flags: `--date`, `--class-field`, `--class-names 282=Cloud`, `--unit`, `--utm`, `--no-pivot`, `--boundary-layer`, `--report-layer`.
 
+Memory: before reading the report the tool looks at the free memory of the machine (minus the same buffer as the
+other tools: 20 % of it, between 0.5 and 1 GB). A report that fits is read at once; a larger one is read in parts and
+the areas are added up (same numbers, one NOTE line says so). Work runs on all cores (`--workers` to limit).
+
 In question mode the second and later reports of a season need only the new report: the script folder remembers
 the last workbook, and boundary, levels, projection and unit are taken from it. A class other than 81 and 82 can
 be given a name (Enter keeps the code); the name is used in the column headers and carried to later reports.
