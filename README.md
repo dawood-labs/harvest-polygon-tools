@@ -288,7 +288,7 @@ The last row is `Totals` (the percentages are computed from the totals).
 
 | Sheet | What it holds |
 |---|---|
-| Dashboard | title band, five tiles with the key numbers, up to six charts (Excel charts, editable), a summary table of the first level |
+| Dashboard | title band; five tiles (crop, harvested, remaining, harvest pace per day, estimated finish date); key findings in plain sentences; up to four charts, each answering one question (Excel charts, editable); a progress table of the first level |
 | Stats | the table at the finest level, frozen header, filter, Totals row |
 | Pivot | a real pivot table on the Stats table: one row per unit of the first level with its lower levels under it; columns = total crop and harvested in each period; the four total columns are in the field list, not ticked. The same numbers stay as plain cells with `--no-pivot` |
 | Chart data (hidden) | the numbers the charts read; right-click a sheet tab > Unhide to see it |

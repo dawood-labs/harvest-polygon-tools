@@ -565,25 +565,30 @@ def test_one_report_dashboard_note(tmp_path):
     _, _, out = run(tmp_path, bp, ["region"], rp, "2026-01-10", "s.xlsx")
     d = openpyxl.load_workbook(out)["Dashboard"]
     texts = [c.value for row in d.iter_rows() for c in row if isinstance(c.value, str)]
-    assert any(t.startswith("The progress line and the per-period columns appear from the second") for t in texts)
-    assert any(t == "First report of the season" or "First report of the season" in t for t in texts)
-    assert len(d._charts) == 3          # one level, one report: area bars, share bars, doughnut
+    assert any(t.startswith("The progress line and the harvest pace appear from the second") for t in texts)
+    assert any("First report of the season" in t for t in texts)
+    assert len(d._charts) == 1          # one level, one report: the stacked bars per unit
 
 
-def dash_res(n_dates=3, other=0.0, levels=("region", "block"), outside=0.0):
-    """A hand-made results structure (see hs.dashboard_results) to draw the Dashboard from."""
+def dash_res(n_dates=3, other=0.0, levels=("region", "block"), outside=0.0, period=None):
+    """A hand-made results structure (see hs.dashboard_results) to draw the Dashboard from: reports 10 days
+    apart, North 1000 (600 harvested), South 500 (100 harvested)."""
     by1 = [("North", 600.0, 400.0, 1000.0), ("South", 100.0, 400.0, 500.0)]
     if outside:
         by1.append((hs.OUTSIDE, outside / 2, outside / 2, outside))
     total = sum(r[3] for r in by1)
     harv = sum(r[1] for r in by1)
-    cum = [harv * (i + 1) / n_dates for i in range(n_dates)]
+    period = period or [harv / n_dates] * n_dates
+    cum = [sum(period[:i + 1]) for i in range(n_dates)]
+    days = [None] + [10] * (n_dates - 1)
     return {"unit": {"text": "acres", "header": "ac", "decimals": 3, "format": "#,##0.000"},
             "level_titles": list(levels), "dates": [f"{5 + 10 * i:02d}-01-2026" for i in range(n_dates)],
             "total": total, "harvested": harv, "remaining": total - harv, "other": other,
-            "other_codes": ["282"] if other else [], "period": [harv / n_dates] * n_dates, "cum_harvested": cum,
+            "other_codes": ["282"] if other else [], "period": period, "days": days,
+            "pace": [None if not n else v / n for v, n in zip(period, days)], "cum_harvested": cum,
             "cum_pct": [c / total for c in cum], "by_level1": by1,
             "top_level2": [("b1 (North)", 300.0), ("b2 (South)", 250.0)] if len(levels) > 1 else [],
+            "finest": [(590.0, 600.0), (10.0, 400.0), (100.0, 500.0)],
             "report": "r.shp", "boundary": "b.shp", "previous": None, "projection": "UTM"}
 
 
@@ -599,43 +604,71 @@ def series_ranges(chart):
 
 
 def test_dashboard_tiles_table_and_charts():
-    res = dash_res()
+    res = dash_res(period=[300.0, 200.0, 200.0])
     dash, cd, blocks = draw(res)
-    assert [dash.cell(row=7, column=c).value for c in (2, 4, 6, 8, 10)] == [1500.0, 700.0, 800.0, 700.0 / 3, 3]
+    assert [dash.cell(row=7, column=c).value for c in (2, 4, 6, 8, 10)] == [1500.0, 700.0, 800.0, 20.0, "06-03-2026"]
     assert dash["D8"].value == "46.7 % of the crop" and dash["F8"].value == "53.3 % of the crop"
-    assert dash["H8"].value == "15-01-2026 to 25-01-2026" and dash["J6"].value == "REPORTS SO FAR"
-    assert len(dash._charts) == 6                       # progress, period, area, share, top, whole
+    assert dash["H8"].value == "acres per day over 10 days"          # 200 in 10 days = 20 a day
+    assert dash["J8"].value == "about 40 days at the latest pace"    # 800 left / 20 a day; 25 Jan + 40 days
+    for r in (6, 7, 8):                                 # no text leaves its tile
+        assert all(dash.cell(row=r, column=c).alignment.shrink_to_fit for c in (2, 4, 6, 8, 10))
+    assert len(dash._charts) == 4                       # progress, pace, area, top
     a0, a1 = blocks["a"]
+    b0, b1 = blocks["b"]
+    assert series_ranges(dash._charts[0]) == [f"B{b0}:B{b1}"]
+    assert series_ranges(dash._charts[1]) == [f"F{b0 + 1}:F{b1}"]          # pace: no value for the first report
+    assert cd.cell(row=b0, column=6).value is None and cd.cell(row=b1, column=6).value == 20.0
     assert series_ranges(dash._charts[2]) == [f"B{a0}:B{a1}", f"C{a0}:C{a1}"]
-    assert series_ranges(dash._charts[3]) == [f"E{a0}:E{a1}", f"F{a0}:F{a1}"]
-    for r in range(a0, a1 + 1):                         # the two shares of a unit add up to 1
-        assert close(cd.cell(row=r, column=5).value + cd.cell(row=r, column=6).value, 1.0, 1e-12)
-    rows = {r[1].value: r for r in dash.iter_rows(min_row=10) if r[1].value in ("North", "South", "Totals")}
-    assert [c.value for c in rows["North"][3:10:2]] == [1000.0, 600.0, 400.0, 0.6]
-    assert [c.value for c in rows["Totals"][3:10:2]] == [1500.0, 700.0, 800.0, 700.0 / 1500.0]
-    cf = list(dash.conditional_formatting)
-    assert len(cf) == 1 and cf[0].rules[0].type == "dataBar"
-    assert str(cf[0].sqref) == f"J{rows['North'][0].row}:J{rows['Totals'][0].row}"
+    assert close(sum(cd.cell(row=r, column=6).value for r in range(a0, a1 + 1)), 1.0, 1e-12)   # shares of remaining
+    rows = {r[1].value: r for r in dash.iter_rows(min_row=20) if r[1].value in ("North", "South", "Totals")}
+    assert [c.value for c in rows["North"][3:10:2]] == [1000.0, 400.0, 0.6, 0.5]
+    assert [c.value for c in rows["Totals"][3:10:2]] == [1500.0, 800.0, 700.0 / 1500.0, 1.0]
+    bars = {str(cf.sqref): cf.rules[0].type for cf in dash.conditional_formatting}
+    n, t = rows["North"][0].row, rows["Totals"][0].row
+    assert bars == {f"H{n}:H{t}": "dataBar", f"J{n}:J{t - 1}": "dataBar"}
     assert not dash.merged_cells.ranges
+
+
+def test_key_findings_say_what_the_numbers_mean():
+    f = hs.key_findings(dash_res(period=[300.0, 200.0, 200.0]))
+    assert f[0] == "46.7 % of the crop is harvested (700.000 of 1,500.000 acres); 800.000 acres remain on 25-01-2026."
+    assert f[1] == ("Latest period (15-01-2026 to 25-01-2026, 10 days): 200.000 acres harvested, 20.0 acres per "
+                    "day, about the same pace as the period before (20.0).")
+    assert f[2] == ("At the pace of the latest period the remaining crop would be harvested in about 40 days, "
+                    "around 06-03-2026 (an estimate, not a plan).")
+    assert f[3] == "Where the work is left: North holds 50 % of the remaining crop (400.000 acres)."
+    assert f[4] == "Most advanced region: North (60.0 % harvested). Least advanced: South (20.0 %)."
+    assert f[5] == "Of the 3 block units with crop, 1 is at least 95 % harvested and 2 are below 50 %."
+    assert len(f) == 6
+    faster = hs.key_findings(dash_res(period=[400.0, 100.0, 200.0]))[1]
+    assert faster.endswith("20.0 acres per day, 100 % faster than the period before (10.0).")
+    slower = hs.key_findings(dash_res(period=[100.0, 400.0, 200.0]))[1]
+    assert slower.endswith("20.0 acres per day, 50 % slower than the period before (40.0).")
+    stopped = dash_res(period=[400.0, 300.0, 0.0])
+    assert hs.forecast(stopped) is None
+    assert "No harvest was measured in the latest period" in " ".join(hs.key_findings(stopped))
+    back = hs.key_findings(dash_res(period=[400.0, 350.0, -50.0]))
+    assert any(t.startswith("Check: the harvested area went down in 1 period") for t in back)
+    full = dash_res()
+    full.update(harvested=1500.0, remaining=0.0, by_level1=[("North", 1000.0, 0.0, 1000.0), ("South", 500.0, 0.0, 500.0)])
+    assert hs.key_findings(full)[0].startswith("Harvest is complete") and hs.forecast(full) is None
+    dash, _, _ = draw(full)
+    assert dash["J7"].value == "Complete"
 
 
 def test_dashboard_other_classes_one_report_and_outside_trace():
     res = dash_res(n_dates=1, other=50.0, levels=("region",), outside=0.02)
     dash, cd, blocks = draw(res)
-    assert dash["J6"].value == "OTHER CLASSES" and dash["J7"].value == 50.0
-    assert dash["J8"].value == "in remaining; class 282" and dash["H8"].value == "first report of the season"
-    for r in (6, 7, 8):                                 # no text leaves its tile
-        assert all(dash.cell(row=r, column=c).alignment.shrink_to_fit for c in (2, 4, 6, 8, 10))
-    assert len(dash._charts) == 3                       # area, share, whole: no progress, no period, no top
-    d0, d1 = blocks["d"]
-    parts = {cd.cell(row=r, column=1).value: cd.cell(row=r, column=2).value for r in range(d0, d1 + 1)}
-    assert list(parts) == ["Harvested", "Remaining", "Other classes"]
-    assert close(sum(parts.values()), res["total"], 1e-12) and parts["Other classes"] == 50.0
-    assert len(dash._charts[2].series[0].data_points) == 3
+    assert dash["H6"].value == "HARVEST PACE" and dash["H7"].value == "-" and dash["J7"].value == "-"
+    assert dash["H8"].value == dash["J8"].value == "known from the second report"
+    texts = [c.value for row in dash.iter_rows() for c in row if isinstance(c.value, str)]
+    assert "-  The remaining crop includes 50.000 acres of class 282 (counted as not harvested)." in texts
+    assert not any("Latest period" in t or "At the pace" in t for t in texts)      # one report: no pace, no forecast
+    assert len(dash._charts) == 1                       # area only: no progress, no pace, no top
     a0, a1 = blocks["a"]
     assert a1 - a0 + 1 == 3                             # the outside trace is written ...
     assert series_ranges(dash._charts[0]) == [f"B{a0}:B{a1 - 1}", f"C{a0}:C{a1 - 1}"]     # ... but not charted
-    names = [r[1].value for r in dash.iter_rows(min_row=10)]
+    names = [r[1].value for r in dash.iter_rows(min_row=12)]
     assert hs.OUTSIDE in names and "Totals" in names    # and it stays in the table, so the rows add up
     big = dash_res(outside=40.0)
     dash2, _, b2 = draw(big)

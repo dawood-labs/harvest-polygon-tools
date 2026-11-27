@@ -217,7 +217,7 @@ What the workbook holds:
 
 | Sheet | What it holds |
 |---|---|
-| Dashboard | key numbers in tiles, charts (progress, per period, per unit, top 10 remaining), a summary table |
+| Dashboard | key numbers in tiles (with harvest pace and an estimated finish date), key findings as text, charts, a progress table |
 | Stats | one row per unit; `Crop Harvested on DD-MM-YYYY` = harvested in that period only; `Totals` row |
 | Pivot | pivot table: one row per unit, columns = total crop and harvested in each period (tick more fields in the list on the right) |
 | Chart data (hidden) | the numbers of the charts |

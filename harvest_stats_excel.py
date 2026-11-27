@@ -67,7 +67,6 @@ from shapely import STRtree  # noqa: E402
 from openpyxl.cell.cell import ILLEGAL_CHARACTERS_RE  # noqa: E402
 from openpyxl.chart import BarChart, DoughnutChart, LineChart, Reference  # noqa: E402
 from openpyxl.chart.label import DataLabelList  # noqa: E402
-from openpyxl.chart.series import DataPoint  # noqa: E402
 from openpyxl.chart.shapes import GraphicalProperties  # noqa: E402
 from openpyxl.chart.text import RichText  # noqa: E402
 from openpyxl.drawing.line import LineProperties  # noqa: E402
@@ -1114,28 +1113,38 @@ def dashboard_results(tab, titles, unit, area_crs, report_info, previous_name):
       dates           report dates 'DD-MM-YYYY', oldest first
       total, harvested, remaining   whole crop area at the latest date; harvested = cumulative 82
       period          area harvested in each period, one per date
+      days            length of each period in days (None for the first report: its start is not known)
+      pace            area harvested per day in each period (None where days is None)
       cum_harvested   cumulative harvested at each date;   cum_pct   the same as a fraction of the crop
-      by_level1       [(name, harvested, remaining, total)] sorted by total crop, largest first; at most 20
-                      rows, the rest summed in one 'Others (n)' row
+      by_level1       [(name, harvested, remaining, total)], most remaining crop first; at most 20 rows, the
+                      rest summed in one 'Others (n)' row; the outside row, when there is one, is the last
       top_level2      [(label 'level-2 (level-1)', remaining)] the 10 largest remaining, [] with one level
+      finest          [(harvested, total)] of every unit of the last level that holds crop
       other           area of the codes other than 81 / 82 at the latest date (it is part of `remaining`)
       other_codes     their texts, e.g. ['282']
       report, boundary, previous, projection    texts for the notes
     """
     tot = tab.totals()
     totals_at = [sum(tab.at(k, d) for k in tab.keys) for d in tab.dates]
-    g1 = sorted(tab.grouped(1), key=lambda x: -x[1]["total"])
-    by1 = [(OUTSIDE if g == OUTSIDE_KEY else str(shown(g[0])), n["harvested"], n["remaining"], n["total"])
-           for g, n in g1[:20]]
-    if len(g1) > 20:
-        rest = [n for _, n in g1[20:]]
-        by1.append((f"Others ({len(rest)})", sum(n["harvested"] for n in rest), sum(n["remaining"] for n in rest),
-                    sum(n["total"] for n in rest)))
+
+    def row(name, nums):
+        return (name, sum(n["harvested"] for n in nums), sum(n["remaining"] for n in nums),
+                sum(n["total"] for n in nums))
+    g1 = tab.grouped(1)
+    inside = sorted((x for x in g1 if x[0] != OUTSIDE_KEY), key=lambda x: -x[1]["remaining"])
+    by1 = [row(str(shown(g[0])), [n]) for g, n in inside[:20]]
+    if len(inside) > 20:
+        by1.append(row(f"Others ({len(inside) - 20})", [n for _, n in inside[20:]]))
+    by1 += [row(OUTSIDE, [n]) for g, n in g1 if g == OUTSIDE_KEY]
     top2 = []
     if tab.nl >= 2:
         g2 = [(g, n) for g, n in tab.grouped(2) if g != OUTSIDE_KEY and n["remaining"] > 0]
         g2.sort(key=lambda x: -x[1]["remaining"])
         top2 = [(f"{shown(g[1])} ({shown(g[0])})", n["remaining"]) for g, n in g2[:10]]
+    finest = [(n["harvested"], n["total"]) for g, n in tab.grouped(tab.nl) if g != OUTSIDE_KEY and n["total"] > 0]
+    iso = [dt.date.fromisoformat(d) for d in tab.dates]
+    days = [None] + [(y - x).days for x, y in zip(iso, iso[1:])]
+    pace = [None if not n else v / n for v, n in zip(tot["period"], days)]
     last = tab.dates[-1]
     others = {c: tot["other"][(c, last)] for c in tab.other[last]}
     return {"other": sum(others.values()),
@@ -1143,10 +1152,95 @@ def dashboard_results(tab, titles, unit, area_crs, report_info, previous_name):
             "unit": {"text": unit.text, "header": unit.header, "decimals": unit.decimals, "format": area_format(unit)},
             "level_titles": list(titles), "dates": [dmy(d) for d in tab.dates],
             "total": tot["total"], "harvested": tot["harvested"], "remaining": tot["remaining"],
-            "period": list(tot["period"]), "cum_harvested": list(tot["cum"]),
+            "period": list(tot["period"]), "days": days, "pace": pace, "cum_harvested": list(tot["cum"]),
             "cum_pct": [c / t if t > 0 else 0.0 for c, t in zip(tot["cum"], totals_at)],
-            "by_level1": by1, "top_level2": top2, "report": report_info["report"],
+            "by_level1": by1, "top_level2": top2, "finest": finest, "report": report_info["report"],
             "boundary": report_info["boundary"], "previous": previous_name, "projection": pc.crs_label(area_crs)}
+
+
+def forecast(res):
+    """(days still needed, finish date 'DD-MM-YYYY') at the pace of the latest period, or None when it cannot
+    be said (one report, no harvest in the latest period, nothing left)."""
+    pace = res["pace"][-1]
+    eps = 0.5 * 10 ** -res["unit"]["decimals"]
+    if pace is None or pace <= 0 or res["remaining"] < eps:
+        return None
+    need = math.ceil(res["remaining"] / pace)
+    d, m, y = (int(x) for x in res["dates"][-1].split("-"))
+    return need, dmy((dt.date(y, m, d) + dt.timedelta(days=need)).isoformat())
+
+
+def key_findings(res):
+    """A few plain sentences that say what the numbers mean (drawn on the Dashboard under the tiles)."""
+    u = res["unit"]["text"]
+    dec = res["unit"]["decimals"]
+    T, H, R = res["total"], res["harvested"], res["remaining"]
+    dates, nd = res["dates"], len(res["dates"])
+    lvl1 = res["level_titles"][0]
+
+    def ar(v):
+        return f"{v:,.{dec}f}"
+
+    def pc1(x):
+        return f"{x * 100:.1f} %"
+
+    def names(items):
+        items = [str(x) if len(str(x)) <= 28 else str(x)[:26] + ".." for x in items]
+        return items[0] if len(items) == 1 else ", ".join(items[:-1]) + " and " + items[-1]
+    out = []
+    if T <= 0:
+        return ["The report holds no crop inside the boundary."]
+    if R < 0.5 * 10 ** -dec:
+        out.append(f"Harvest is complete: all {ar(T)} {u} of the crop are harvested on {dates[-1]}.")
+    else:
+        out.append(f"{pc1(H / T)} of the crop is harvested ({ar(H)} of {ar(T)} {u}); {ar(R)} {u} remain "
+                   f"on {dates[-1]}.")
+    if nd >= 2 and res["pace"][-1] is not None:
+        p, n = res["pace"][-1], res["days"][-1]
+        text = (f"Latest period ({dates[-2]} to {dates[-1]}, {pc.plural(n, 'day')}): {ar(res['period'][-1])} {u} "
+                f"harvested, {p:,.1f} {u} per day")
+        prev = res["pace"][-2] if nd >= 3 else None
+        if prev and prev > 0:
+            chg = p / prev - 1
+            text += (f", about the same pace as the period before ({prev:,.1f})" if abs(chg) < 0.02 else
+                     f", {abs(chg) * 100:.0f} % {'faster' if chg > 0 else 'slower'} than the period before "
+                     f"({prev:,.1f})")
+        out.append(text + ".")
+        fc = forecast(res)
+        if fc:
+            out.append(f"At the pace of the latest period the remaining crop would be harvested in about "
+                       f"{pc.plural(fc[0], 'day')}, around {fc[1]} (an estimate, not a plan).")
+        elif R >= 0.5 * 10 ** -dec:
+            out.append("No harvest was measured in the latest period, so no finish date can be estimated.")
+    units = [r for r in res["by_level1"] if r[0] != OUTSIDE and not r[0].startswith("Others (") and r[3] > 0]
+    if len(units) >= 2 and R > 0:
+        top = units[:min(3, len(units) - 1)]                       # by_level1 is sorted by remaining crop
+        share = sum(r[2] for r in top) / R
+        out.append(f"Where the work is left: {names([r[0] for r in top])} "
+                   f"hold{'s' if len(top) == 1 else ''} {share * 100:.0f} % of the remaining crop "
+                   f"({ar(sum(r[2] for r in top))} {u}).")
+        big = [r for r in units if r[3] >= 0.01 * T]
+        if len(big) >= 2:
+            best = max(big, key=lambda r: r[1] / r[3])
+            worst = min(big, key=lambda r: r[1] / r[3])
+            if best[0] != worst[0]:
+                out.append(f"Most advanced {lvl1}: {names([best[0]])} ({pc1(best[1] / best[3])} harvested). "
+                           f"Least advanced: {names([worst[0]])} ({pc1(worst[1] / worst[3])}).")
+    if len(res["level_titles"]) >= 2 and res["finest"]:
+        shares = [h / t for h, t in res["finest"]]
+        done = sum(x >= 0.95 for x in shares)
+        low = sum(x < 0.5 for x in shares)
+        out.append(f"Of the {len(shares)} {res['level_titles'][-1]} units with crop, {done} "
+                   f"{'is' if done == 1 else 'are'} at least 95 % harvested and {low} "
+                   f"{'is' if low == 1 else 'are'} below 50 %.")
+    if res["other"] > 0:
+        out.append(f"The remaining crop includes {ar(res['other'])} {u} of class {', '.join(res['other_codes'][:3])} "
+                   f"(counted as not harvested).")
+    neg = sum(1 for v in res["period"] if round(v, dec) < 0)
+    if neg:
+        out.append(f"Check: the harvested area went down in {pc.plural(neg, 'period')} (red cells on 'Stats'); "
+                   f"harvested crop cannot come back.")
+    return out
 
 
 def write_chart_data(cd, res):
@@ -1154,50 +1248,47 @@ def write_chart_data(cd, res):
 
     Layout (1-based rows; one empty row between blocks; the header of a block is the row above its first row):
       row 1      a note line
-      block "a"  level-1 title | Harvested | Remaining | Total crop | Harvested % | Remaining %
-                 one row per entry of res['by_level1'] (largest crop first)
-      block "b"  Report date | Harvested so far % | Harvested in the period | Harvested so far; one row per date
-      block "d"  the whole crop: 'Harvested' | area, 'Remaining' | area, and, when the latest report holds
-                 other codes, 'Other classes' | area (then 'Remaining' is the remaining crop without them)
+      block "a"  level-1 title | Harvested | Remaining | Total crop | Harvested % | Share of the remaining crop
+                 one row per entry of res['by_level1'] (most remaining crop first)
+      block "b"  Report date | Harvested so far % | Harvested in the period | Harvested so far | Days in the
+                 period | Harvested per day; one row per date (the last two are empty for the first report)
       block "e"  (2+ levels only) 'level-2 (level-1)' | Remaining: res['top_level2']
-    Returns {"a": (first, last), "b": ..., "d": ..., "e": ... or None}."""
+    Returns {"a": (first, last), "b": ..., "e": ... or None}."""
     af = res["unit"]["format"]
     put(cd, 1, 1, f"Numbers behind the Dashboard charts (areas in {res['unit']['text']}). Written by the tool; "
                   f"edit the Stats sheet, not this one.", font=font(10, italic=True, color=C_INK2))
     blocks = {}
     r = 3
     lvl1 = res["level_titles"][0]
+    R = res["remaining"]
     put(cd, r, 1, f"Harvested and remaining by {lvl1}", font=font(10, True))
-    for j, h in enumerate([lvl1, "Harvested", "Remaining", "Total crop", "Harvested %", "Remaining %"]):
+    heads = [lvl1, "Harvested", "Remaining", "Total crop", "Harvested %", "Share of the remaining crop"]
+    for j, h in enumerate(heads):
         put(cd, r + 1, 1 + j, h, font=font(10, True))
     for i, (name, h, rem, t) in enumerate(res["by_level1"]):
         put(cd, r + 2 + i, 1, name, font=font(10), number_format="@")
         for j, v in enumerate((h, rem, t)):
             put(cd, r + 2 + i, 2 + j, v, font=font(10), number_format=af)
         put(cd, r + 2 + i, 5, h / t if t > 0 else 0.0, font=font(10), number_format=PCT)
-        put(cd, r + 2 + i, 6, rem / t if t > 0 else 0.0, font=font(10), number_format=PCT)
+        put(cd, r + 2 + i, 6, rem / R if R > 0 else 0.0, font=font(10), number_format=PCT)
     blocks["a"] = (r + 2, r + 1 + len(res["by_level1"]))
     r = blocks["a"][1] + 2
     nd = len(res["dates"])
     put(cd, r, 1, "Per report date", font=font(10, True))
-    for j, h in enumerate(["Report date", "Harvested so far %", "Harvested in the period", "Harvested so far"]):
+    heads = ["Report date", "Harvested so far %", "Harvested in the period", "Harvested so far",
+             "Days in the period", "Harvested per day"]
+    for j, h in enumerate(heads):
         put(cd, r + 1, 1 + j, h, font=font(10, True))
     for i in range(nd):
         put(cd, r + 2 + i, 1, res["dates"][i], font=font(10), number_format="@")
         put(cd, r + 2 + i, 2, res["cum_pct"][i], font=font(10), number_format=PCT)
         put(cd, r + 2 + i, 3, res["period"][i], font=font(10), number_format=af)
         put(cd, r + 2 + i, 4, res["cum_harvested"][i], font=font(10), number_format=af)
+        if res["days"][i]:
+            put(cd, r + 2 + i, 5, res["days"][i], font=font(10), number_format="0")
+            put(cd, r + 2 + i, 6, res["pace"][i], font=font(10), number_format="#,##0.0")
     blocks["b"] = (r + 2, r + 1 + nd)
     r = blocks["b"][1] + 2
-    put(cd, r, 1, "Whole crop area", font=font(10, True))
-    parts = [("Harvested", res["harvested"]), ("Remaining", res["remaining"] - res["other"])]
-    if res["other"] > 0:
-        parts.append(("Other classes", res["other"]))
-    for i, (name, v) in enumerate(parts):
-        put(cd, r + 1 + i, 1, name, font=font(10))
-        put(cd, r + 1 + i, 2, v, font=font(10), number_format=af)
-    blocks["d"] = (r + 1, r + len(parts))
-    r = blocks["d"][1] + 2
     blocks["e"] = None
     if len(res["level_titles"]) >= 2 and res["top_level2"]:
         t2 = res["level_titles"][1]
@@ -1209,8 +1300,8 @@ def write_chart_data(cd, res):
             put(cd, r + 2 + i, 2, v, font=font(10), number_format=af)
         blocks["e"] = (r + 2, r + 1 + len(res["top_level2"]))
     cd.column_dimensions["A"].width = 40
-    for c in "BCDEF":
-        cd.column_dimensions[c].width = 22
+    for col in "BCDEF":
+        cd.column_dimensions[col].width = 24
     cd.sheet_view.showGridLines = False
     return blocks
 
@@ -1254,24 +1345,29 @@ def _bar(cd, first, last, cols, title, value_title, colors, horizontal=True, sta
     return ch
 
 
+def _x_title(ch, text):
+    ch.x_axis.title = text
+    ch.x_axis.title.overlay = False
+    ch.x_axis.title.tx.rich.p[0].pPr = ParagraphProperties(defRPr=CharacterProperties(
+        latin=DFont(typeface=FONT), sz=900, b=False, solidFill=C_INK2))
+
+
 def write_dashboard(dash, cd, res):
     """Draw the Dashboard sheet `dash` from the plain results `res` (see dashboard_results). Top to bottom:
-      a title band; five tiles with the key numbers; the charts, two per row; a small table per level-1 unit
-      with a bar in the '% harvested' cell; notes.
-    Charts (native, editable; they read their numbers from the sheet `cd`, see write_chart_data):
-      progress     line, share of the crop harvested so far        block b, column B   (2+ reports)
-      period       columns, area harvested in each period          block b, column C   (2+ reports)
-      area         stacked bars per level-1 unit, in the unit      block a, columns B:C
-      share        stacked bars per level-1 unit, in % of its crop block a, columns E:F
-      top          bars, level-2 units with most remaining crop    block e, column B   (2+ levels)
-      whole        doughnut of the whole crop area                 block d
+      a title band; five tiles (crop, harvested, remaining, pace, estimated finish); 'Key findings' in plain
+      sentences (key_findings); the charts, two per row; a table per level-1 unit; notes.
+    Each chart answers one question (native, editable; numbers on the sheet `cd`, see write_chart_data):
+      progress   how far is the harvest?      line, share of the crop harvested    block b, column B  (2+ reports)
+      pace       is it speeding up?           columns, area harvested per day      block b, column F  (2+ reports)
+      area       where is the crop left?      stacked bars per level-1 unit        block a, columns B:C
+      top        which level-2 units first?   bars, most remaining crop            block e, column B  (2+ levels)
     No computation of areas happens here: every number comes from `res`."""
     blocks = write_chart_data(cd, res)
     af = res["unit"]["format"]
     utext = res["unit"]["text"]
     dates = res["dates"]
     nd, last = len(dates), dates[-1]
-    T, H, R, other = res["total"], res["harvested"], res["remaining"], res["other"]
+    T, H, R = res["total"], res["harvested"], res["remaining"]
     lvl1 = res["level_titles"][0]
     widths = DASH_WIDTHS
     ncol = len(widths)
@@ -1296,16 +1392,24 @@ def write_dashboard(dash, cd, res):
     # ---- tiles
     hp = H / T if T > 0 else 0.0
     rp = R / T if T > 0 else 0.0
+    fc = forecast(res)
+    done = R < 0.5 * 10 ** -res["unit"]["decimals"]
     tiles = [("TOTAL CROP AREA", T, af, utext, C_INK2),
              ("HARVESTED SO FAR", H, af, f"{hp * 100:.1f} % of the crop", C_HARVEST),
-             ("REMAINING", R, af, f"{rp * 100:.1f} % of the crop", C_REMAIN),
-             ("HARVESTED THIS PERIOD", res["period"][-1], af,
-              f"{dates[-2]} to {last}" if nd > 1 else "first report of the season", C_HARVEST)]
-    if other > 0:
-        codes = ", ".join(res["other_codes"][:2]) + (" ..." if len(res["other_codes"]) > 2 else "")
-        tiles.append(("OTHER CLASSES", other, af, f"in remaining; class {codes}", C_OTHER))
+             ("REMAINING", R, af, f"{rp * 100:.1f} % of the crop", C_REMAIN)]
+    if nd > 1 and res["pace"][-1] is not None:
+        tiles.append(("HARVEST PACE, LATEST PERIOD", res["pace"][-1], "#,##0.0",
+                      f"{utext} per day over {pc.plural(res['days'][-1], 'day')}", C_HARVEST))
     else:
-        tiles.append(("REPORTS SO FAR", nd, "0", f"latest {last}", C_INK2))
+        tiles.append(("HARVEST PACE", "-", "@", "known from the second report", C_INK2))
+    if done:
+        tiles.append(("ESTIMATED FINISH", "Complete", "@", "nothing left to harvest", C_REMAIN))
+    elif fc:
+        tiles.append(("ESTIMATED FINISH", fc[1], "@", f"about {pc.plural(fc[0], 'day')} at the latest pace",
+                      C_REMAIN))
+    else:
+        tiles.append(("ESTIMATED FINISH", "-", "@", "known from the second report" if nd < 2
+                      else "no harvest in the latest period", C_INK2))
     for (label, val, fmt, sub, accent), c in zip(tiles, wide):      # shrink_to_fit: no text leaves its tile
         put(dash, 6, c, label, font=font(8, True, C_INK2), fill=fill(C_TILE),
             border=Border(top=Side(style="thick", color=accent)),
@@ -1319,21 +1423,28 @@ def write_dashboard(dash, cd, res):
     dash.row_dimensions[8].height = 20
     dash.row_dimensions[9].height = 12
 
+    # ---- key findings
+    row = 10
+    put(dash, row, 2, "Key findings", font=font(12, True, C_INK))
+    for text in key_findings(res):
+        row += 1
+        put(dash, row, 2, "-  " + text, font=font(10, color=C_INK))
+        dash.row_dimensions[row].height = 17
+    row += 2
+
     # ---- charts
     a0, a1 = blocks["a"]
     b0, b1 = blocks["b"]
-    d0, d1 = blocks["d"]
     if a1 > a0 and res["by_level1"][-1][0] == OUTSIDE and res["by_level1"][-1][3] < 0.001 * T:
         a1 -= 1                 # a trace of crop outside the boundary: in the table below, not in the charts
     n1 = a1 - a0 + 1
     h_std = 310
-    h_lvl = max(h_std, 110 + 26 * n1)
     charts = []
     if nd >= 2:
         ln = LineChart()
         ln.add_data(Reference(cd, min_col=2, min_row=b0 - 1, max_row=b1), titles_from_data=True)
         text_categories(ln, cat_ref(cd, b0, b1))
-        style_chart(ln, "Harvest progress: share of the crop harvested so far", "Report date", None)
+        style_chart(ln, "How far is the harvest? Share of the crop harvested so far", "Report date", None)
         color_series(ln.series[0], C_HARVEST, line=True)
         ln.legend = None
         ln.y_axis.number_format = "0%"
@@ -1343,76 +1454,53 @@ def write_dashboard(dash, cd, res):
         if nd <= 12:
             ln.series[0].dLbls = data_labels("0.0%", "t", bold=True)
         charts.append((ln, h_std))
-        cc = _bar(cd, b0, b1, [3], "Area harvested in each period", f"Area ({utext})", [C_HARVEST],
-                  horizontal=False)
-        cc.x_axis.title = "Report date"
-        cc.x_axis.title.overlay = False
-        cc.x_axis.title.tx.rich.p[0].pPr = ParagraphProperties(defRPr=CharacterProperties(
-            latin=DFont(typeface=FONT), sz=900, b=False, solidFill=C_INK2))
+        cc = _bar(cd, b0 + 1, b1, [6], f"Is it speeding up? {utext.capitalize()} harvested per day in each period",
+                  None, [C_HARVEST], horizontal=False)
+        cc.series[0].tx = None                               # one series: the title says what it is
+        _x_title(cc, "Period ending on")
         cc.y_axis.number_format = "#,##0"
-        if nd <= 12:
-            cc.series[0].dLbls = data_labels("#,##0", "outEnd", bold=True)
+        if nd <= 13:
+            cc.series[0].dLbls = data_labels("#,##0.0", "outEnd", bold=True)
         charts.append((cc, h_std))
-    ar = _bar(cd, a0, a1, [2, 3], f"Harvested and remaining by {lvl1} ({utext})", None,
-              [C_HARVEST, C_REMAIN], stacked=True)
-    ar.y_axis.number_format = "#,##0"
-    charts.append((ar, h_lvl))
-    sh = _bar(cd, a0, a1, [5, 6], f"Harvested and remaining by {lvl1} (% of its crop)", None,
-              [C_HARVEST, C_REMAIN], stacked=True)
-    sh.y_axis.number_format = "0%"
-    sh.y_axis.scaling.min = 0
-    sh.y_axis.scaling.max = 1
-    sh.y_axis.majorUnit = 0.2
-    if n1 <= 25:
-        sh.series[0].dLbls = data_labels("0%", "ctr", color=C_INK, bold=True)
-        sh.series[1].dLbls = data_labels("0%", "ctr", color="FFFFFF", bold=True)
-    charts.append((sh, h_lvl))
-    h_last = h_std
+    h_low = max(h_std, 110 + 26 * n1)
     if blocks["e"]:
         e0, e1 = blocks["e"]
         n_e = e1 - e0 + 1
-        h_last = max(h_std, 110 + 26 * n_e)
-        tb = _bar(cd, e0, e1, [2], f"Top {n_e} {res['level_titles'][1]} by remaining crop ({utext})", None,
-                  [C_REMAIN])
+        h_low = max(h_low, 110 + 26 * n_e)
+    ar = _bar(cd, a0, a1, [2, 3], f"Where is the crop left? Harvested and remaining by {lvl1} ({utext})", None,
+              [C_HARVEST, C_REMAIN], stacked=True)
+    ar.y_axis.number_format = "#,##0"
+    charts.append((ar, h_low))
+    if blocks["e"]:
+        tb = _bar(cd, e0, e1, [2], f"Which {res['level_titles'][1]} hold the most remaining crop? ({utext})",
+                  None, [C_REMAIN])
         tb.y_axis.number_format = "#,##0"
         tb.series[0].dLbls = data_labels("#,##0", "outEnd", bold=True)
-        charts.append((tb, h_last))
-    dn = DoughnutChart(holeSize=58)
-    dn.add_data(Reference(cd, min_col=2, min_row=d0, max_row=d1), titles_from_data=False)
-    text_categories(dn, cat_ref(cd, d0, d1))
-    style_chart(dn, f"Whole crop area on {last}")
-    s = dn.series[0]
-    slice_colors = [C_HARVEST, C_REMAIN, C_OTHER][:d1 - d0 + 1]
-    s.data_points = [DataPoint(idx=i) for i in range(len(slice_colors))]
-    for p, colr in zip(s.data_points, slice_colors):
-        p.graphicalProperties = GraphicalProperties(solidFill=colr, ln=LineProperties(solidFill="FFFFFF", w=19050))
-    s.dLbls = data_labels("0.0%", None, pct=True, color="FFFFFF", bold=True)
-    charts.append((dn, h_last))
+        charts.append((tb, h_low))
 
     left_x, gap = col_px(widths[0]), 20
     full = sum(col_px(w) for w in widths[1:10])             # columns B..J
     cw = (full - gap) // 2
-    row = 10
     for i in range(0, len(charts), 2):
         pair = charts[i:i + 2]
         h = max(x[1] for x in pair)
         for j, (ch, _) in enumerate(pair):
-            place(dash, ch, left_x + j * (cw + gap), row, cw, h, widths)
+            place(dash, ch, left_x + j * (cw + gap), row, cw if len(pair) == 2 else full, h, widths)
         row += h // 20 + 2
     if nd < 2:
-        put(dash, row, 2, "The progress line and the per-period columns appear from the second report on.",
+        put(dash, row, 2, "The progress line and the harvest pace appear from the second report on.",
             font=font(9, italic=True, color=C_INK2))
         row += 2
 
     # ---- table per level-1 unit
-    put(dash, row, 2, f"Summary by {lvl1}", font=font(12, True, C_INK))
+    put(dash, row, 2, f"Progress by {lvl1} (most remaining crop first)", font=font(12, True, C_INK))
     row += 1
-    heads = [lvl1, f"Total crop ({utext})", f"Harvested ({utext})", f"Remaining ({utext})", "Harvested %"]
+    heads = [lvl1, f"Total crop ({utext})", f"Remaining ({utext})", "Harvested %", "Share of the remaining crop"]
     for c in range(2, 11):
         dash.cell(row=row, column=c).fill = fill(C_HEAD)
     for h, c in zip(heads, wide):
         put(dash, row, c, h, font=font(10, True, "FFFFFF"), fill=fill(C_HEAD),
-            alignment=Alignment(horizontal="left" if c == 2 else "right", vertical="center"))
+            alignment=Alignment(horizontal="left" if c == 2 else "right", vertical="center", shrink_to_fit=True))
     dash.row_dimensions[row].height = 22
     first = row + 1
     lines = [(n, t, h, rem) for n, h, rem, t in res["by_level1"]] + [("Totals", T, H, R)]
@@ -1427,20 +1515,26 @@ def write_dashboard(dash, cd, res):
             if bg is not None:
                 cell.fill = bg
         put(dash, row, 2, name, font=font(10, is_tot))
-        for v, c in zip((t, h, rem), wide[1:4]):
-            put(dash, row, c, v, font=font(10, is_tot), number_format=af)
-        put(dash, row, 10, h / t if t > 0 else 0.0, font=font(10, True), number_format=PCT)
+        put(dash, row, 4, t, font=font(10, is_tot), number_format=af)
+        put(dash, row, 6, rem, font=font(10, is_tot), number_format=af)
+        put(dash, row, 8, h / t if t > 0 else 0.0, font=font(10, True), number_format=PCT)
+        put(dash, row, 10, rem / R if R > 0 else 0.0, font=font(10, True), number_format=PCT)
     dash.conditional_formatting.add(
-        f"J{first}:J{row}", DataBarRule(start_type="num", start_value=0, end_type="num", end_value=1,
+        f"H{first}:H{row}", DataBarRule(start_type="num", start_value=0, end_type="num", end_value=1,
                                         color=C_HARVEST, showValue=True))
+    if row - 1 >= first:
+        dash.conditional_formatting.add(
+            f"J{first}:J{row - 1}", DataBarRule(start_type="num", start_value=0, end_type="num", end_value=1,
+                                                color="8A9440", showValue=True))
     row += 2
 
     # ---- notes
     notes = [f"Report: {res['report']}   |   Boundary: {res['boundary']}"
              + (f"   |   Previous workbook: {res['previous']}" if res["previous"] else ""),
              f"Projection for areas: {res['projection']}   |   Levels: " + " > ".join(res["level_titles"]),
-             "Remaining = every class that is not harvested. The charts read their numbers from the hidden "
-             "sheet 'Chart data'; the full table is on 'Stats'."]
+             "Remaining = every class that is not harvested. Pace = area harvested in a period / its days. The "
+             "finish date assumes the pace of the latest period.",
+             "The charts read their numbers from the hidden sheet 'Chart data'; the full table is on 'Stats'."]
     for text in notes:
         put(dash, row, 2, text, font=font(9, italic=True, color=C_INK2))
         row += 1
