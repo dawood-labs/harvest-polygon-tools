@@ -189,6 +189,20 @@ python postprocess_remaining.py --final C:\work\report1\checked.gpkg --l1 D:\dat
 `--min-acres` / `--sliver-acres` are always acres. `--min-area` / `--sliver-area` are in the `--unit`. Exit code 3 = the geometry check found a problem.
 
 ## 11. Tool 3 - statistics workbook
+
+**Second and later reports of a season: the short way.** The tool remembers its last run per script folder.
+When that run finished and its workbook is still there, it shows the season (workbook, reports so far, boundary,
+levels, projection, unit) and asks `Add the next report to this season? [Y/n]`. Press Enter and it asks only:
+
+| Question | What you type | Enter gives |
+|---|---|---|
+| `1) Harvest report layer of the new date` | the new report | - |
+| `2) Report date` | - | the date in the file name |
+| `   Name for class ...` (only for a class other than 81 and 82) | a name | the code, or the name used before |
+| `3) Output folder` and `Output name` | - | next to the report, `<report name>_stats` |
+
+Everything else comes from the previous workbook. Type `n` to answer all the questions again (new season, other
+boundary). Keep one copy of the scripts per mill folder: each copy remembers its own season.
 ```
 python harvest_stats_excel.py
 ```
@@ -206,6 +220,7 @@ python harvest_stats_excel.py
 | `4) Report date (YYYY-MM-DD or DD-MM-YYYY) [2026-01-12]:` | Enter, or the date | the date in the file name |
 | `5) Workbook of the previous report (Enter = this is the first report):` | the workbook of the report before | first report |
 | `5) Workbook of the previous report (type 0 if this is the first report) [...]:` | Enter = the last workbook; `0` = first report | the last workbook |
+| `   Name for class 282 [282]:` (only when the report holds a class other than 81 and 82) | a name, e.g. `Cloud` | the code (or the name used before) |
 | `6) Projection ...` and `Unit for areas:` | as in Tools 1 and 2 | the previous workbook's (must stay the same) |
 | `7) Output folder [...]:` / `   Output name (saved as .xlsx) [...]:` | a folder / a name | report folder / report name + `_stats` |
 | `Start? [Y/n]:` | `n` = cancel | start |

@@ -299,6 +299,97 @@ def test_other_code_is_remaining_with_its_own_column(tmp_path):
     assert "Sum of 282 on 15-01-2026" in [c.value for c in pv3[hs.PIVOT_TOP]]
 
 
+def test_class_names_for_other_codes(tmp_path, monkeypatch):
+    bp = boundary(tmp_path / "b.gpkg")
+    crops = crop_squares()
+
+    def with_282(limit):
+        return harvest_classes(crops, step_rule(limit, lambda x, y: 282 if 1500 < y < 1800 and 300 < x < 1300 else None))
+    r1 = report(tmp_path / "r1.gpkg", crops, with_282(400))
+    r2 = report(tmp_path / "r2.gpkg", crops, with_282(800))
+    r3 = report(tmp_path / "r3.gpkg", crops, harvest_classes(crops, step_rule(1200)))
+    assert hs.other_codes(r1, "predicted") == ["282"] and hs.other_codes(r3, "predicted") == []
+    assert hs.parse_class_names("282=Cloud, 232 = Smoke cover") == {"282": "Cloud", "232": "Smoke cover"}
+    with pytest.raises(hs.UserError):
+        hs.parse_class_names("282")
+    plain, _, _ = stats_table(run(tmp_path, bp, ["region", "block"], r1, "2026-01-05", "plain.xlsx")[2])
+    _, txt1, o1 = run(tmp_path, bp, ["region", "block"], r1, "2026-01-05", "s1.xlsx",
+                      class_names={"282": "Cloud", "999": "Nothing"})
+    h1, rows1, wb1 = stats_table(o1)
+    assert "Cloud on 05-01-2026" in h1 and "282 on 05-01-2026" not in h1
+    assert "the report holds no such class" in txt1                       # 999 is not in the report
+    assert [r[2:] for r in rows1] == [r[2:] for r in stats_table(tmp_path / "plain.xlsx")[1]]   # only the title changes
+    assert "282 on 05-01-2026" in plain
+    assert "Sum of Cloud on 05-01-2026" in [c.value for c in wb1["Pivot"][hs.PIVOT_TOP]]
+    texts = [c.value for row in wb1["Dashboard"].iter_rows() for c in row if isinstance(c.value, str)]
+    assert any("of class Cloud (counted as not harvested)" in t for t in texts)
+    # the next report: the name is the default (what Enter gives in question mode) and goes on by itself
+    meta, _, renamed = hs.read_previous(o1)
+    assert hs.code_label("282", hs.merge_labels(meta.get("labels"), renamed)) == "Cloud"
+    _, _, o2 = run(tmp_path, bp, ["region", "block"], r2, "2026-01-15", "s2.xlsx", o1)
+    h2, _, _ = stats_table(o2)
+    assert "Cloud on 05-01-2026" in h2 and "Cloud on 15-01-2026" in h2
+    # the same code as the name: the plain header
+    _, _, o2b = run(tmp_path, bp, ["region", "block"], r2, "2026-01-15", "s2b.xlsx", o1, class_names={"282": "282"})
+    h2b, _, _ = stats_table(o2b)
+    assert "282 on 15-01-2026" in h2b and "Cloud on 05-01-2026" in h2b
+
+
+def typed(monkeypatch, answers):
+    """Feed question mode the lines an analyst would type; fails when a question is left without an answer."""
+    it = iter(answers)
+
+    def one(prompt=""):
+        try:
+            return next(it)
+        except StopIteration:
+            raise AssertionError(f"unexpected question: {prompt}")
+    monkeypatch.setattr(pc, "_input", one)
+    monkeypatch.setattr("builtins.input", one)
+    return it
+
+
+def test_question_mode_first_report_then_only_the_new_report(tmp_path, monkeypatch, capsys):
+    bp = boundary(tmp_path / "b.gpkg")
+    crops = crop_squares()
+    r1 = report(tmp_path / "r_2026-01-05.gpkg", crops, harvest_classes(crops, step_rule(400)))
+    r2 = report(tmp_path / "r_2026-01-15.gpkg", crops, harvest_classes(
+        crops, step_rule(800, lambda x, y: 282 if 1500 < y < 1800 and 300 < x < 1300 else None)))
+    r3 = report(tmp_path / "r_2026-01-25.gpkg", crops, harvest_classes(crops, step_rule(1200)))
+    # first report: every question (boundary, 2 levels + titles, report, date, no previous, zone, unit, output)
+    left = typed(monkeypatch, [str(bp), "2", "region", "Zone", "block", "Part", str(r1), "", "", "32631", "2",
+                               str(tmp_path), "one", "", ""])
+    hs.main(["--ask"])
+    assert list(left) == [] and (tmp_path / "one.xlsx").is_file()
+    text1 = capsys.readouterr().out
+    assert "1) Boundary layer" not in text1 or "This folder already holds a season" not in text1
+    # second report: the folder remembers the season, so only the report (and the name of class 282) is asked
+    left = typed(monkeypatch, ["", str(r2), "", "Cloud", str(tmp_path), "two", "", ""])
+    hs.main(["--ask"])
+    text2 = capsys.readouterr().out
+    assert list(left) == []
+    assert "This folder already holds a season" in text2 and "levels      : Zone > Part" in text2
+    assert "unit        : hectares" in text2 and "The report holds 1 class other than 81 and 82: 282." in text2
+    h2, rows2, _ = stats_table(tmp_path / "two.xlsx")
+    assert h2[:2] == ("Zone", "Part") and "Cloud on 15-01-2026" in h2
+    meta, _ = hidden(tmp_path / "two.xlsx")
+    assert meta["unit"] == "hectares" and [r["date"] for r in meta["reports"]] == ["2026-01-05", "2026-01-15"]
+    ref, _ = reference(bp, ["region", "block"], r2)
+    want_ha = sum(v.get("82", 0.0) for v in ref.values()) * ACRE / 10000.0
+    assert close(rows2[-1][h2.index("Total Harvested Crop (15-01-2026)")], want_ha, 1e-6)
+    # third report: the same report given again by mistake is refused; Enter keeps the name 'Cloud' ... but this
+    # report has no 282, so no name question at all
+    left = typed(monkeypatch, ["", str(r2), str(r3), "", str(tmp_path), "three", "", ""])
+    hs.main(["--ask"])
+    text3 = capsys.readouterr().out
+    assert list(left) == [] and "That report is already in the workbook" in text3 and "Name for class" not in text3
+    h3, _, _ = stats_table(tmp_path / "three.xlsx")
+    assert "Cloud on 15-01-2026" in h3 and "Crop Harvested on 25-01-2026" in h3
+    # 'n' at the first question gives the full questions back
+    typed(monkeypatch, ["n"])
+    assert hs.next_report(hs.load_last_run()) is None
+
+
 def test_negative_period_written_and_warned(tmp_path):
     bp = boundary(tmp_path / "b.gpkg")
     crops = crop_squares()
@@ -817,10 +908,11 @@ def test_question_mode(tmp_path):
     assert h[:2] == ("region", "Block title")
     # second report: the previous run's answers are the defaults, the last workbook is offered as previous
     rp2 = report(tmp_path / "Harvest_2026-01-20_x.gpkg", crops, harvest_classes(crops, step_rule(900)), field="cls")
-    answers = [str(bp), "", "", "", "", "", str(rp2), "", "", "", "", "", "", "", ""]
+    # ('n' at "Add the next report to this season?" asks for all the questions again)
+    answers = ["n", str(bp), "", "", "", "", "", str(rp2), "", "", "", "", "", "", "", ""]
     code, txt = ask(answers)
     assert code == 0, txt
-    assert "A previous run was found:" in txt
+    assert "This folder already holds a season:" in txt and "A previous run was found:" in txt
     assert f"Workbook of the previous report (type 0 if this is the first report) [{out}]:" in txt
     assert "Enter keeps it (it must stay the same)" in txt
     meta, _ = hidden(tmp_path / "Harvest_2026-01-20_x_stats.xlsx")

@@ -553,6 +553,36 @@ def code_label(code, labels):
     return best
 
 
+def other_codes(report, class_field):
+    """The class codes of the report other than 81 and 82, as texts, in natural order (attributes only)."""
+    try:
+        data = pc.vector_read(report, read_geometry=False, columns=[class_field])[3]
+    except Exception:
+        return []
+    found = {code_text(v) for v in (data[0] if len(data) else [])}
+    return sorted((c for c in found if c not in (REMAIN, HARVEST)), key=natural_key)
+
+
+def class_name_check(a):
+    """A name for a class code: any short text."""
+    name = clean_text(a, 60)
+    return (name, None) if name else (None, "Type a name, or press Enter to keep the code.")
+
+
+def parse_class_names(text):
+    """'282=Cloud,232=Smoke' -> {'282': 'Cloud', '232': 'Smoke'}."""
+    out = {}
+    for part in (split_list(text) if text else []):
+        if not part:
+            continue
+        code, sep, name = part.partition("=")
+        name = clean_text(name, 60)
+        if not sep or not code.strip() or not name:
+            raise UserError(f"--class-names: write CODE=NAME, comma separated (got '{part}')")
+        out[code.strip()] = name
+    return out
+
+
 # ---------------------------------------------------------------- the table
 class Table3:
     """The finest-level rows and every derived number, from the history (values in the unit)."""
@@ -1698,8 +1728,10 @@ def check_previous(meta, levels, unit, area_crs, date, boundary):
 
 
 def run(boundary, levels, report, date, out, previous=None, utm=None, unit=None, class_field=None,
-        allow_non_utm=False, pivot=True, boundary_layer=None, report_layer=None, workers=None):
-    """levels = [{'field': name, 'title': title}] from the largest unit inwards; date = 'YYYY-MM-DD'."""
+        allow_non_utm=False, pivot=True, boundary_layer=None, report_layer=None, workers=None,
+        class_names=None):
+    """levels = [{'field': name, 'title': title}] from the largest unit inwards; date = 'YYYY-MM-DD';
+    class_names = {code: name} for the codes other than 81 / 82 (a name replaces the code in the headers)."""
     pc.start_clock()
     t0 = time.time()
     unit = pc.get_unit(unit)
@@ -1759,6 +1791,17 @@ def run(boundary, levels, report, date, out, previous=None, utm=None, unit=None,
             old = {(x["code"], x["date"]): x["text"] for x in prev_meta.get("labels") or []}
             if old.get((c, d)) != text:
                 n = f"your column title '{text}' for code {c} on {dmy(d)} is kept."
+                print(f"NOTE: {n}")
+                notes.append(n)
+
+    if class_names:
+        present = set(other_codes(report, class_field))
+        for c, name in class_names.items():
+            c = str(c)
+            if c in present:
+                labels[(c, date)] = f"{name} on {dmy(date)}"       # carried to later reports (code_label)
+            else:
+                n = f"the name '{name}' was given for class {c}, but the report holds no such class; it is ignored."
                 print(f"NOTE: {n}")
                 notes.append(n)
 
@@ -2152,6 +2195,8 @@ def interactive(defaults):
                     lv["title"] = t
         break
 
+    class_names = ask_class_names(report, class_field, previous)
+
     rcrs = layer_crs(report) or layer_crs(boundary)
     if not rcrs:
         raise SystemExit("Stopped: neither the report nor the boundary layer has a coordinate system (.prj missing).")
@@ -2210,6 +2255,8 @@ def interactive(defaults):
         t = f" (column title '{lv['title']}')" if lv["title"] != lv["field"] else ""
         print(f"  level {i}     : {lv['field']}{t}")
     print(f"  report      : {report}{rl}\n  class field : {class_field}\n  report date : {dmy(date)}")
+    for c, name in class_names.items():
+        print(f"  class {c:<6}: " + (f"named '{name}'" if name != c else "keeps its code as the name"))
     print(f"  previous    : {previous if previous else 'none (first report)'}")
     print(f"  projection  : {utm.name} (EPSG:{utm.to_epsg()})")
     print(f"  unit        : {unit.text}")
@@ -2218,7 +2265,109 @@ def interactive(defaults):
         print("Cancelled.")
         return None
     return dict(boundary=boundary, levels=levels, report=report, date=date, out=out, previous=previous, utm=utm,
-                unit=unit, class_field=class_field, allow_non_utm=allow, boundary_layer=b_layer, report_layer=r_layer)
+                unit=unit, class_field=class_field, allow_non_utm=allow, boundary_layer=b_layer, report_layer=r_layer,
+                class_names=class_names)
+
+
+def ask_class_names(report, class_field, previous):
+    """Ask a name for every class code other than 81 / 82 (Enter keeps the name used before, else the code)."""
+    names = {}
+    others = other_codes(report, class_field)
+    if not others:
+        return names
+    known = {}
+    if previous:
+        try:
+            pm, _, renamed = read_previous(previous)
+            known = merge_labels(pm.get("labels"), renamed)
+        except Exception:
+            known = {}
+    print(f"   The report holds {pc.plural(len(others), 'class', 'classes')} other than 81 and 82: "
+          f"{', '.join(others)}.")
+    print("   Such a class gets its own column and is counted as remaining crop. Give it a name, or press "
+          "Enter to keep what is in [ ].")
+    for c in others:
+        names[c] = pc.ask_text(f"   Name for class {c}", code_label(c, known) or c, class_name_check)
+    return names
+
+
+def next_report(last):
+    """The short way for the second and later reports of a season: this folder's last run finished and its
+    workbook is still there, so only the new report is asked; boundary, levels, titles, projection and unit
+    come from that workbook. Returns the answers for run(), or None to go through all the questions."""
+    try:
+        prev = Path(last["out"])
+        boundary = Path(last["boundary"])
+        if last.get("status") != "finished" or not prev.is_file() or not boundary.is_file() \
+                or not made_by_this_tool(prev):
+            return None
+        meta, _, _ = read_previous(prev)
+        levels = [dict(x) for x in meta["levels"]]
+        dates = sorted(r["date"] for r in meta["reports"])
+        unit = pc.get_unit(meta["unit"])
+        crs = pyproj.CRS(meta["crs"])
+        names = [f[0] for f in layer_fields(boundary)]
+        if any(lv["field"] not in names for lv in levels):
+            return None
+    except Exception:
+        return None
+    lv_text = " > ".join(lv.get("title") or lv["field"] for lv in levels)
+    print("This folder already holds a season:")
+    print(f"  workbook    : {prev}")
+    print(f"  reports     : {len(dates)} ({', '.join(dmy(d) for d in dates[-6:])})")
+    print(f"  boundary    : {boundary}")
+    print(f"  levels      : {lv_text}")
+    print(f"  projection  : {pc.crs_label(crs)}")
+    print(f"  unit        : {unit.text}")
+    if not pc.ask_yes_no("Add the next report to this season? (n = answer all the questions again)", True):
+        print()
+        return None
+    while True:
+        report = pc.ask_text("1) Harvest report layer of the new date (.shp / .gpkg / .geojson)", None,
+                             pc._file_check(pc.VECTOR_EXTS, "report layer"))
+        sig = file_sig(report)
+        if any(isinstance(r.get("file"), dict) and r["file"].get("name") == sig.get("name")
+               and r["file"].get("size") == sig.get("size") for r in meta["reports"]):
+            print("   That report is already in the workbook. Give the report of the new date.")
+            continue
+        break
+    r_layer = pc.ask_layer(report, "report layer")
+    rnames = [str(n) for n in pc.vector_info(report).get("fields", [])]
+    wanted = [n for n in rnames if n == last.get("class_field")] or [n for n in rnames if n.casefold() == "predicted"]
+    if not wanted:
+        print(f"   The report has no class field '{last.get('class_field') or 'predicted'}': all the questions "
+              "are asked.\n")
+        return None
+    class_field = wanted[0]
+    found = dates_in_name(report)
+    ddef = found[-1].isoformat() if found else None
+
+    def d_check(a):
+        d, hint = parse_date(a)
+        if hint:
+            return None, hint
+        if d.isoformat() <= dates[-1]:
+            return None, f"The workbook already ends on {dmy(dates[-1])}; the new report must be later."
+        return d, None
+    if ddef and ddef <= dates[-1]:
+        ddef = None
+    date = pc.ask_text("2) Report date (YYYY-MM-DD or DD-MM-YYYY)", ddef, d_check).isoformat()
+    class_names = ask_class_names(report, class_field, prev)
+    out = ask_out(report.parent, report.stem + "_stats", prev, label="3) Output folder")
+    print("\nYour answers:")
+    print(f"  report      : {report}\n  class field : {class_field}\n  report date : {dmy(date)}")
+    for c, name in class_names.items():
+        print(f"  class {c:<6}: " + (f"named '{name}'" if name != c else "keeps its code as the name"))
+    print(f"  previous    : {prev}")
+    print(f"  output      : {out}")
+    print(f"  from the previous workbook: boundary {boundary.name}, levels {lv_text}, {unit.text}, "
+          f"{pc.crs_label(crs)}")
+    if not pc.ask_yes_no("Start?", True):
+        print("Cancelled.")
+        return {}
+    return dict(boundary=boundary, levels=levels, report=report, date=date, out=out, previous=prev, utm=crs,
+                unit=unit, class_field=class_field, allow_non_utm=True, boundary_layer=last.get("boundary_layer"),
+                report_layer=r_layer, class_names=class_names)
 
 
 def describe_last(last):
@@ -2269,6 +2418,8 @@ def main(argv=None):
     ap.add_argument("--report", help="harvest report of this date (.shp, .gpkg, .geojson or .json)")
     ap.add_argument("--report-layer", default=None, help="layer of the report file when it has several")
     ap.add_argument("--class-field", default=None, help="class field of the report (default: predicted)")
+    ap.add_argument("--class-names", default=None, help="names for class codes other than 81 and 82, used in the "
+                    "column headers: 282=Cloud,232=Smoke (default: the code itself)")
     ap.add_argument("--date", default=None, help="report date YYYY-MM-DD or DD-MM-YYYY (default: from the file name)")
     ap.add_argument("--previous", default=None, help="workbook this tool wrote for the previous report")
     ap.add_argument("--unit", default=None,
@@ -2286,13 +2437,15 @@ def main(argv=None):
         try:
             last = load_last_run()
             defaults = {}
-            if last:
+            ans = next_report(last) if last else None
+            if ans is None and last:
                 describe_last(last)
                 defaults = dict(boundary=pc._existing(last.get("boundary")), report=pc._existing(last.get("report")),
                                 levels=last.get("levels"), utm=last.get("utm"), unit=last.get("unit"),
                                 out=last.get("out"), class_field=last.get("class_field"),
                                 prev_out=last.get("previous"))
-            ans = interactive(defaults)
+            if ans is None:
+                ans = interactive(defaults)
             if ans:
                 run(**ans, pivot=not a.no_pivot, workers=a.workers)
         except KeyboardInterrupt:
@@ -2349,7 +2502,8 @@ def main(argv=None):
         levels = [{"field": f, "title": t or f} for f, t in zip(fields, titles)]
         res = run(Path(pc.clean_path(a.boundary)), levels, report, d.isoformat(), out,
                   Path(pc.clean_path(a.previous)) if a.previous else None, utm, unit, a.class_field,
-                  a.allow_non_utm, not a.no_pivot, a.boundary_layer, a.report_layer, a.workers)
+                  a.allow_non_utm, not a.no_pivot, a.boundary_layer, a.report_layer, a.workers,
+                  parse_class_names(a.class_names))
         if res and not res["check_ok"]:
             sys.exit(3)
     except UserError as e:

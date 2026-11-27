@@ -254,7 +254,11 @@ Flag mode:
 python harvest_stats_excel.py --boundary units.shp --levels name_2,name --level-titles "Area,Unit" --report report_2026-01-12.shp --previous report_2025-12-23_stats.xlsx --out report_2026-01-12_stats.xlsx
 ```
 
-Other flags: `--date`, `--class-field`, `--unit`, `--utm`, `--no-pivot`, `--boundary-layer`, `--report-layer`.
+Other flags: `--date`, `--class-field`, `--class-names 282=Cloud`, `--unit`, `--utm`, `--no-pivot`, `--boundary-layer`, `--report-layer`.
+
+In question mode the second and later reports of a season need only the new report: the script folder remembers
+the last workbook, and boundary, levels, projection and unit are taken from it. A class other than 81 and 82 can
+be given a name (Enter keeps the code); the name is used in the column headers and carried to later reports.
 
 ### Columns of the table
 
