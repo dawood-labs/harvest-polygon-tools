@@ -162,6 +162,12 @@ Dirty inputs are accepted: only their polygon parts are used, and a NOTE line sa
 
 The tool finds the earlier run and asks: `Continue the last run with these settings? [Y/n]:`
 
+The memory of the last run is kept in the folder of the script (in a hidden sub-folder `.harvest_tools`), not on
+the computer. One folder per area, with its own copy of the two scripts, means its own memory: a copy never
+shows or reuses the run of another folder. The first line of the screen says which folder is speaking.
+If that folder cannot be written (a read-only share), the old place in your home folder is used and a NOTE says so.
+The saved copy of the prepared L1 stays in your home folder and is shared by all folders.
+
 - **Continue** after a stop, a power cut or Ctrl+C: press Enter. Finished tiles are reused.
 - **Change one late setting** (sliver size, projection, unit, output format): answer `n`, change that one value.
   Only the last step runs again, in seconds.

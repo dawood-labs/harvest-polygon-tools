@@ -3205,23 +3205,89 @@ def final_stage(merged, out, raster_crs, utm_crs, min_acres, keep_slivers, worke
 
 
 # ---------------------------------------------------------------- last run / cache keys
-LAST_RUN = Path.home() / ".preprocess_classified" / "last_run.json"
+STATE_ENV = "HARVEST_TOOLS_STATE_DIR"
+_NOTED = set()
 
 
-def save_last_run(info):
+def _record_places(script_file, kind, home_dir):
+    """(record next to the script, home-folder fallback record, script folder)."""
+    script_dir = Path(script_file).resolve().parent
+    env = os.environ.get(STATE_ENV)
+    base = Path(env) if env else script_dir / ".harvest_tools"
+    return base / f"last_run_{kind}.json", Path.home() / home_dir / "last_run.json", script_dir
+
+
+def last_run_home(script_file):
+    """The folder this script's last-run memory belongs to (shown on the previous-run screen)."""
+    env = os.environ.get(STATE_ENV)
+    return Path(env) if env else Path(script_file).resolve().parent
+
+
+def _hide_folder(d):
+    if os.name == "nt":
+        try:
+            import ctypes
+            ctypes.windll.kernel32.SetFileAttributesW(str(d), 2)     # 2 = hidden
+        except Exception:
+            pass
+
+
+def save_record(script_file, kind, home_dir, info):
+    """Save a last-run record next to the script, found out by really writing it (a network drive may say
+    "writable" and still refuse). On an OSError the old home-folder record is used instead, with one note
+    per run. The record holds the script folder, so a fallback record is only ever read back by a script of
+    the same folder. Never fails the run."""
+    primary, home, script_dir = _record_places(script_file, kind, home_dir)
+    info = dict(info, script_dir=str(script_dir))
     try:
-        LAST_RUN.parent.mkdir(parents=True, exist_ok=True)
-        _write_json(LAST_RUN, info)
+        new = not primary.parent.exists()
+        primary.parent.mkdir(parents=True, exist_ok=True)
+        if new:
+            _hide_folder(primary.parent)
+        _write_json(primary, info)
+        return
+    except OSError:
+        pass
+    except Exception:
+        return
+    if kind not in _NOTED:
+        _NOTED.add(kind)
+        print(f"NOTE: cannot save the last-run record next to the script ({primary.parent.parent}); "
+              f"using {home} instead.")
+    try:
+        home.parent.mkdir(parents=True, exist_ok=True)
+        _write_json(home, info)
     except Exception:
         pass
 
 
-def load_last_run():
+def load_record(script_file, kind, home_dir):
+    """The record next to the script; else the home fallback record when this same script folder wrote it
+    (old records without a script folder never match); else None."""
+    primary, home, script_dir = _record_places(script_file, kind, home_dir)
     try:
-        d = json.loads(LAST_RUN.read_text())
-        return d if d.get("raster") and d.get("l1") and d.get("out") else None
+        return json.loads(primary.read_text())
+    except Exception:
+        pass
+    try:
+        d = json.loads(home.read_text())
+        return d if d.get("script_dir") == str(script_dir) else None
     except Exception:
         return None
+
+
+def last_run_file():
+    """The record next to the script (where it is saved when that works)."""
+    return _record_places(__file__, "preprocess", ".preprocess_classified")[0]
+
+
+def save_last_run(info):
+    save_record(__file__, "preprocess", ".preprocess_classified", info)
+
+
+def load_last_run():
+    d = load_record(__file__, "preprocess", ".preprocess_classified")
+    return d if d and d.get("raster") and d.get("l1") and d.get("out") else None
 
 
 def _hash(obj):
@@ -4105,6 +4171,7 @@ def describe_last(last):
     if state == "running" and _pid_alive(last.get("pid")) is False:
         state = "interrupted"
     print("A previous run was found:")
+    print(f"  (remembered for this folder: {last_run_home(__file__)})")
     ll = f" (layer {last['l1_layer']})" if last.get("l1_layer") else ""
     print(f"  raster      : {last['raster']}\n  L1 layer    : {last['l1']}{ll}\n  output      : {last['out']}")
     print(f"  majority    : {majority_text(ans)}")

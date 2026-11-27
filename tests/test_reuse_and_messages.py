@@ -20,8 +20,6 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 import postprocess_remaining as ppr  # noqa: E402
 import preprocess_classified as pc  # noqa: E402
 
-pc.LAST_RUN = Path(tempfile.mkdtemp()) / "last_run.json"     # never touch the user's own last-run records
-ppr.LAST_RUN = Path(tempfile.mkdtemp()) / "last_run.json"
 GB = 1024 ** 3
 
 
@@ -139,7 +137,7 @@ def test_pre_low_memory_note_once_and_previous_run_screen():
         pc.memory_status = real
     assert txt.count("NOTE: Free memory is low") == 1, txt
     assert txt.index("NOTE: Free memory is low") < txt.index("] plan (")
-    last = json.loads(pc.LAST_RUN.read_text())
+    last = json.loads(pc.last_run_file().read_text())
     _, scr = quiet(pc.describe_last, dict(last, utm="EPSG:32636"))
     assert "  status      : finished, started " in scr and "finished, finished" not in scr
     assert "  majority    : yes, 4 neighbours\n" in scr
@@ -325,7 +323,7 @@ def test_pre_chain_of_new_names_computes_once():
     for t in txts[1:]:
         assert f"Reusing saved work from {(d / 'a_work').resolve()}" in t and "tiles (filter" not in t, t
     assert all(read_wkb(o) == read_wkb(outs[0]) for o in outs[1:])
-    assert json.loads(pc.LAST_RUN.read_text())["data_work"] == str((d / "a_work").resolve())
+    assert json.loads(pc.last_run_file().read_text())["data_work"] == str((d / "a_work").resolve())
 
 
 def test_post_chain_of_new_names_computes_once():

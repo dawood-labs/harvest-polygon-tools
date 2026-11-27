@@ -25,7 +25,6 @@ from output_checks import assert_clean_output  # noqa: E402
 ACRE = 4046.85642
 CRS = "EPSG:32631"            # metric working CRS of the synthetic cases (neutral open-sea coordinates)
 X0, Y0 = 500000.0, 100000.0
-ppr.LAST_RUN = Path(tempfile.mkdtemp()) / "last_run.json"   # never touch the user's own last-run record
 
 
 def B(x0, y0, x1, y1):

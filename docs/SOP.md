@@ -136,6 +136,7 @@ Small harvested pieces (rule: 0.2 acres or smaller AND touching remaining cane)
 
 ## 7. Run again
 Start the same tool. You see `A previous run was found:` and the old answers.
+The first line says which folder the memory belongs to. Each folder with its own copy of the scripts has its own memory.
 Then: `Continue the last run with these settings? [Y/n]:`
 | You want to ... | Do this | What happens |
 |---|---|---|
@@ -167,7 +168,9 @@ After `n`, every question shows your old answer in [brackets].
 
 ## 9. Good to know
 - Saved work: the folder `<output name>_work` sits next to each output (size is in the RESULT). Delete it when no run is active; `--clean` does it for you.
-- Tool 1 saves a copy of the prepared L1 in your home folder: `.preprocess_classified\l1_prepared` (max 2 GB, safe to delete).
+- Working on many areas? Make one folder per area and copy both .py files into each. Each folder remembers its own last run.
+- The last-run memory is in the hidden folder `.harvest_tools` next to the scripts. If that folder cannot be written, your home folder is used and a NOTE tells you.
+- Tool 1 saves a copy of the prepared L1 in your home folder (shared by all areas): `.preprocess_classified\l1_prepared` (max 2 GB, safe to delete).
 - Areas are calculated in ONE UTM zone, the one you choose. Use the same zone for every report.
 - Units: 1 acre = 4,046.85642 m2, 1 hectare = 10,000 m2, 1 rai = 1,600 m2. Pick one unit and keep it for every report.
 - Formats: in and out, .shp, .gpkg and .geojson all work. A .geojson is about 2.5 times bigger than a .shp. A shapefile cannot be bigger than 2 GB: use GeoPackage for very big results.

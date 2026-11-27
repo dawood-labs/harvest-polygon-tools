@@ -96,7 +96,6 @@ BYTES_PER_VERTEX = 400                # planning figure for the overlay work of 
 WORKER_BASE_BYTES = pc.WORKER_BASE_BYTES
 MARKER = "postprocess_remaining.workfolder"
 LOCK = pc.LOCK
-LAST_RUN = Path.home() / ".postprocess_remaining" / "last_run.json"
 CLASS_CHOICES = {"both": (REMAIN, HARVEST), "81": (REMAIN,), "82": (HARVEST,)}
 _OURS = re.compile(r"^(manifest\.json|chunks\.bin|clusters\.bin|classified\.bin|"
                    r"(l1|final)_valid(\.tmp)?\.gpkg(-wal|-shm|-journal)?)(\.tmp)?$")
@@ -688,20 +687,17 @@ def run_pool(fn, tasks, procs, threads, buffer, label, mode="container", on_prog
 
 
 # ---------------------------------------------------------------- last run / cache keys
+def last_run_file():
+    return pc._record_places(__file__, "postprocess", ".postprocess_remaining")[0]
+
+
 def save_last_run(info):
-    try:
-        LAST_RUN.parent.mkdir(parents=True, exist_ok=True)
-        pc._write_json(LAST_RUN, info)
-    except Exception:
-        pass
+    pc.save_record(__file__, "postprocess", ".postprocess_remaining", info)
 
 
 def load_last_run():
-    try:
-        d = json.loads(LAST_RUN.read_text())
-        return d if d.get("final") and d.get("l1") and d.get("out") else None
-    except Exception:
-        return None
+    d = pc.load_record(__file__, "postprocess", ".postprocess_remaining")
+    return d if d and d.get("final") and d.get("l1") and d.get("out") else None
 
 
 def stage_keys(final_path, l1_path, out, area_crs, a):
@@ -1418,6 +1414,7 @@ def describe_last(last):
     if state == "running" and pc._pid_alive(last.get("pid")) is False:
         state = "interrupted"
     print("A previous run was found:")
+    print(f"  (remembered for this folder: {pc.last_run_home(__file__)})")
     fl, ll = (f" (layer {last[k]})" if last.get(k) else "" for k in ("final_layer", "l1_layer"))
     print(f"  FINAL       : {last['final']}{fl}\n  L1 layer    : {last['l1']}{ll}\n  output      : {last['out']}")
     unit = pc.unit_of_record(ans)

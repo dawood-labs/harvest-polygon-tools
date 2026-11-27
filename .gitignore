@@ -26,3 +26,5 @@ venv/
 *.geojson
 *.json
 !tests/**/*.json
+# last-run memory of the tools (one per folder)
+.harvest_tools/

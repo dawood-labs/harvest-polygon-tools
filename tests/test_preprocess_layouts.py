@@ -27,7 +27,6 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 import preprocess_classified as pc  # noqa: E402
 from output_checks import assert_clean_output  # noqa: E402
 
-pc.LAST_RUN = Path(tempfile.mkdtemp()) / "last_run.json"   # never touch the user's own last-run record
 
 PX = 0.0001
 ORIGIN = (4.0, 1.0)
