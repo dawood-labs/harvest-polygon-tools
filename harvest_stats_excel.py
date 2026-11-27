@@ -553,13 +553,76 @@ def code_label(code, labels):
     return best
 
 
+def _dbf_distinct(path, field):
+    """Distinct values of one attribute of a shapefile, read straight from the .dbf column (no geometry, no
+    record objects: a few hundredths of a second for a million rows). None when the file is not as expected."""
+    p = Path(path)
+    dbf = next((q for q in (p.with_suffix(".dbf"), p.with_suffix(".DBF")) if q.is_file()), None)
+    if dbf is None:
+        return None
+    with open(dbf, "rb") as f:
+        head = f.read(32)
+        if len(head) < 32:
+            return None
+        nrec = int.from_bytes(head[4:8], "little")
+        hlen = int.from_bytes(head[8:10], "little")
+        rlen = int.from_bytes(head[10:12], "little")
+        offset, found = 1, None
+        while True:
+            d = f.read(32)
+            if len(d) < 32 or d[0] == 0x0D:
+                break
+            name = d[:11].split(b"\0")[0].decode("ascii", "ignore")
+            if name == field:
+                found = (offset, d[16], chr(d[11]))
+                break
+            offset += d[16]
+    if found is None or rlen <= 0 or dbf.stat().st_size < hlen + nrec * rlen:
+        return None
+    if nrec == 0:
+        return []
+    off, length, kind = found
+    rows = np.memmap(dbf, dtype=np.uint8, mode="r", offset=hlen, shape=(nrec, rlen))
+    col = np.ascontiguousarray(rows[:, off:off + length]).view(f"S{length}").ravel()
+    vals = np.unique(col[rows[:, 0] != 0x2A])                     # 0x2A marks a deleted record
+    del rows
+    out = []
+    for v in vals:
+        if any(c > 127 for c in v):
+            return None                                           # text in a code page: let the reader decode it
+        t = v.decode("ascii").strip()
+        if kind in "NF":
+            if t in ("", "*" * len(t)):
+                out.append(None)
+            else:
+                x = float(t)
+                out.append(int(x) if x == int(x) else x)
+        elif kind == "C":
+            out.append(t or None)
+        else:
+            return None
+    return out
+
+
+def distinct_values(path, field):
+    """Distinct values of one attribute of a layer, the fastest way the format allows."""
+    p = Path(path)
+    if p.suffix.lower() == ".shp":
+        try:
+            got = _dbf_distinct(p, field)
+            if got is not None:
+                return got
+        except Exception:
+            pass
+    return list(pc.vector_read(p, read_geometry=False, columns=[field])[3][0])
+
+
 def other_codes(report, class_field):
     """The class codes of the report other than 81 and 82, as texts, in natural order (attributes only)."""
     try:
-        data = pc.vector_read(report, read_geometry=False, columns=[class_field])[3]
+        found = {code_text(v) for v in distinct_values(report, class_field)}
     except Exception:
         return []
-    found = {code_text(v) for v in (data[0] if len(data) else [])}
     return sorted((c for c in found if c not in (REMAIN, HARVEST)), key=natural_key)
 
 
@@ -2148,10 +2211,15 @@ def interactive(defaults):
     if len(found) > 1:
         print(f"   The file name holds {len(found)} dates: {', '.join(d.isoformat() for d in found)}.")
     ddef = found[-1].isoformat() if found else None
+    edit = bool(defaults.get("edit"))                     # a second round after 'e' at Start?: the answers given
+    if edit and defaults.get("date"):
+        ddef = defaults["date"]
     date = pc.ask_text("4) Report date (YYYY-MM-DD or DD-MM-YYYY)", ddef, parse_date).isoformat()
 
     last_out = defaults.get("out")
     prev_def = last_out if last_out and Path(last_out).is_file() and made_by_this_tool(last_out) else None
+    if edit:
+        prev_def = defaults.get("previous")
     q = ("5) Workbook of the previous report (type 0 if this is the first report)" if prev_def
          else "5) Workbook of the previous report (Enter = this is the first report)")
     previous, prev_meta = None, None
@@ -2195,7 +2263,7 @@ def interactive(defaults):
                     lv["title"] = t
         break
 
-    class_names = ask_class_names(report, class_field, previous)
+    class_names = ask_class_names(report, class_field, previous, defaults.get("class_names") if edit else None)
 
     rcrs = layer_crs(report) or layer_crs(boundary)
     if not rcrs:
@@ -2246,7 +2314,10 @@ def interactive(defaults):
                   f"season, because the history is not recomputed.")
             continue
         break
-    out = ask_out(report.parent, report.stem + "_stats", previous)
+    if edit and defaults.get("out_edit"):
+        out = ask_out(Path(defaults["out_edit"]).parent, Path(defaults["out_edit"]).stem, previous)
+    else:
+        out = ask_out(report.parent, report.stem + "_stats", previous)
     print("\nYour answers:")
     bl = f" (layer {b_layer})" if pc.layer_kw(boundary) else ""
     rl = f" (layer {r_layer})" if pc.layer_kw(report) else ""
@@ -2261,16 +2332,23 @@ def interactive(defaults):
     print(f"  projection  : {utm.name} (EPSG:{utm.to_epsg()})")
     print(f"  unit        : {unit.text}")
     print(f"  output      : {out}")
-    if not pc.ask_yes_no("Start?", True):
+    choice = pc.ask_start()
+    if choice == "cancel":
         print("Cancelled.")
         return None
+    if choice == "edit":
+        raise pc.EditAnswers(dict(edit=True, boundary=str(boundary), report=str(report), levels=levels,
+                                  utm=crs_text(utm), unit=unit.key, class_field=class_field, date=date,
+                                  previous=str(previous) if previous else None, class_names=class_names,
+                                  out_edit=str(out)))
     return dict(boundary=boundary, levels=levels, report=report, date=date, out=out, previous=previous, utm=utm,
                 unit=unit, class_field=class_field, allow_non_utm=allow, boundary_layer=b_layer, report_layer=r_layer,
                 class_names=class_names)
 
 
-def ask_class_names(report, class_field, previous):
-    """Ask a name for every class code other than 81 / 82 (Enter keeps the name used before, else the code)."""
+def ask_class_names(report, class_field, previous, given=None):
+    """Ask a name for every class code other than 81 / 82 (Enter keeps the name typed just before, else the
+    name used in the previous workbook, else the code)."""
     names = {}
     others = other_codes(report, class_field)
     if not others:
@@ -2287,7 +2365,8 @@ def ask_class_names(report, class_field, previous):
     print("   Such a class gets its own column and is counted as remaining crop. Give it a name, or press "
           "Enter to keep what is in [ ].")
     for c in others:
-        names[c] = pc.ask_text(f"   Name for class {c}", code_label(c, known) or c, class_name_check)
+        names[c] = pc.ask_text(f"   Name for class {c}", (given or {}).get(c) or code_label(c, known) or c,
+                               class_name_check)
     return names
 
 
@@ -2322,49 +2401,61 @@ def next_report(last):
     if not pc.ask_yes_no("Add the next report to this season? (n = answer all the questions again)", True):
         print()
         return None
+    given = {}
     while True:
-        report = pc.ask_text("1) Harvest report layer of the new date (.shp / .gpkg / .geojson)", None,
-                             pc._file_check(pc.VECTOR_EXTS, "report layer"))
-        sig = file_sig(report)
-        if any(isinstance(r.get("file"), dict) and r["file"].get("name") == sig.get("name")
-               and r["file"].get("size") == sig.get("size") for r in meta["reports"]):
-            print("   That report is already in the workbook. Give the report of the new date.")
-            continue
-        break
-    r_layer = pc.ask_layer(report, "report layer")
-    rnames = [str(n) for n in pc.vector_info(report).get("fields", [])]
-    wanted = [n for n in rnames if n == last.get("class_field")] or [n for n in rnames if n.casefold() == "predicted"]
-    if not wanted:
-        print(f"   The report has no class field '{last.get('class_field') or 'predicted'}': all the questions "
-              "are asked.\n")
-        return None
-    class_field = wanted[0]
-    found = dates_in_name(report)
-    ddef = found[-1].isoformat() if found else None
+        while True:
+            report = pc.ask_text("1) Harvest report layer of the new date (.shp / .gpkg / .geojson)",
+                                 given.get("report"), pc._file_check(pc.VECTOR_EXTS, "report layer"))
+            sig = file_sig(report)
+            if any(isinstance(r.get("file"), dict) and r["file"].get("name") == sig.get("name")
+                   and r["file"].get("size") == sig.get("size") for r in meta["reports"]):
+                print("   That report is already in the workbook. Give the report of the new date.")
+                given.pop("report", None)
+                continue
+            break
+        r_layer = pc.ask_layer(report, "report layer")
+        rnames = [str(n) for n in pc.vector_info(report).get("fields", [])]
+        wanted = ([n for n in rnames if n == last.get("class_field")]
+                  or [n for n in rnames if n.casefold() == "predicted"])
+        if not wanted:
+            print(f"   The report has no class field '{last.get('class_field') or 'predicted'}': all the questions "
+                  "are asked.\n")
+            return None
+        class_field = wanted[0]
+        found = dates_in_name(report)
+        ddef = given.get("date") or (found[-1].isoformat() if found else None)
 
-    def d_check(a):
-        d, hint = parse_date(a)
-        if hint:
-            return None, hint
-        if d.isoformat() <= dates[-1]:
-            return None, f"The workbook already ends on {dmy(dates[-1])}; the new report must be later."
-        return d, None
-    if ddef and ddef <= dates[-1]:
-        ddef = None
-    date = pc.ask_text("2) Report date (YYYY-MM-DD or DD-MM-YYYY)", ddef, d_check).isoformat()
-    class_names = ask_class_names(report, class_field, prev)
-    out = ask_out(report.parent, report.stem + "_stats", prev, label="3) Output folder")
-    print("\nYour answers:")
-    print(f"  report      : {report}\n  class field : {class_field}\n  report date : {dmy(date)}")
-    for c, name in class_names.items():
-        print(f"  class {c:<6}: " + (f"named '{name}'" if name != c else "keeps its code as the name"))
-    print(f"  previous    : {prev}")
-    print(f"  output      : {out}")
-    print(f"  from the previous workbook: boundary {boundary.name}, levels {lv_text}, {unit.text}, "
-          f"{pc.crs_label(crs)}")
-    if not pc.ask_yes_no("Start?", True):
-        print("Cancelled.")
-        return {}
+        def d_check(a):
+            d, hint = parse_date(a)
+            if hint:
+                return None, hint
+            if d.isoformat() <= dates[-1]:
+                return None, f"The workbook already ends on {dmy(dates[-1])}; the new report must be later."
+            return d, None
+        if ddef and ddef <= dates[-1]:
+            ddef = None
+        date = pc.ask_text("2) Report date (YYYY-MM-DD or DD-MM-YYYY)", ddef, d_check).isoformat()
+        class_names = ask_class_names(report, class_field, prev, given.get("class_names"))
+        if given.get("out"):
+            out = ask_out(Path(given["out"]).parent, Path(given["out"]).stem, prev, label="3) Output folder")
+        else:
+            out = ask_out(report.parent, report.stem + "_stats", prev, label="3) Output folder")
+        print("\nYour answers:")
+        print(f"  report      : {report}\n  class field : {class_field}\n  report date : {dmy(date)}")
+        for c, name in class_names.items():
+            print(f"  class {c:<6}: " + (f"named '{name}'" if name != c else "keeps its code as the name"))
+        print(f"  previous    : {prev}")
+        print(f"  output      : {out}")
+        print(f"  from the previous workbook: boundary {boundary.name}, levels {lv_text}, {unit.text}, "
+              f"{pc.crs_label(crs)}")
+        choice = pc.ask_start()
+        if choice == "cancel":
+            print("Cancelled.")
+            return {}
+        if choice == "start":
+            break
+        given = dict(report=str(report), date=date, class_names=class_names, out=str(out))
+        print(pc.EDIT_NOTE)
     return dict(boundary=boundary, levels=levels, report=report, date=date, out=out, previous=prev, utm=crs,
                 unit=unit, class_field=class_field, allow_non_utm=True, boundary_layer=last.get("boundary_layer"),
                 report_layer=r_layer, class_names=class_names)
@@ -2445,7 +2536,7 @@ def main(argv=None):
                                 out=last.get("out"), class_field=last.get("class_field"),
                                 prev_out=last.get("previous"))
             if ans is None:
-                ans = interactive(defaults)
+                ans = pc.ask_all(interactive, defaults)
             if ans:
                 run(**ans, pivot=not a.no_pivot, workers=a.workers)
         except KeyboardInterrupt:

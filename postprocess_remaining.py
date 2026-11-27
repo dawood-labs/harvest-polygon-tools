@@ -1389,9 +1389,14 @@ def interactive(defaults):
     print(f"  projection  : {utm.name} (EPSG:{utm.to_epsg()})")
     print(f"  unit        : {unit.text} (field {unit.field})")
     print(f"  sliver rule : {'pieces <= ' + pc.size_in_unit(sliver, unit) + ' touching remaining -> 81' if rule else 'off'}")
-    if not pc.ask_yes_no("Start?", True):
+    choice = pc.ask_start()
+    if choice == "cancel":
         print("Cancelled.")
         return None
+    if choice == "edit":
+        epsg = utm.to_epsg()
+        raise pc.EditAnswers(dict(final=str(final), l1=str(l1), out=str(out), rule=rule, sliver_acres=sliver,
+                                  unit=unit.key, utm=f"EPSG:{epsg}" if epsg else None))
     return dict(final=final, l1_path=l1, out=out, sliver_acres=sliver, rule=rule, utm=utm, classes=classes,
                 allow_non_utm=allow, assume_crs=assume, unit=unit, final_layer=final_layer, l1_layer=l1_layer)
 
@@ -1539,7 +1544,7 @@ def main(argv=None):
                                     utm=f"EPSG:{epsg}" if epsg else None)
                     print()
             if ans is None:
-                ans = interactive(defaults)
+                ans = pc.ask_all(interactive, defaults)
             while ans:
                 try:
                     run(**ans, **common)

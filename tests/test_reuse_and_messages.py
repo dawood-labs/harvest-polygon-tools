@@ -197,13 +197,13 @@ def test_pre_question_defaults_after_no_and_skip_when_inputs_gone():
     pc.save_last_run({"raster": str(r), "l1": str(l1), "out": str(d / "prev out.gpkg"), "utm": "EPSG:32631",
                       "work": str(d / "prev out_work"), "answers": {"do_filter": True, "neighbors": 4},
                       "status": "finished", "progress": "finished", "started": "x"})
-    answers = ["n", "", "", "", "", "", "", "", "", "", "", "", "n"]
+    answers = ["n", "", "", "", "", "", "", "", "", "", "", "", "c"]
     _, txt = piped(pc.main, answers, ["--ask"])
     assert "A previous run was found" in txt and "Cancelled." in txt
     assert f"3) Output folder [{d}]" in txt and "Output name [prev out]" in txt and "(.geojson)  [2]:" in txt
     pc.save_last_run({"raster": str(d / "gone.tif"), "l1": str(l1), "out": str(d / "prev out.gpkg"),
                       "utm": "EPSG:32631", "answers": {}, "status": "finished", "progress": "finished"})
-    _, txt = piped(pc.main, [str(r), "", "", "", "", "", "", "", "", "", "", "n"], ["--ask"])
+    _, txt = piped(pc.main, [str(r), "", "", "", "", "", "", "", "", "", "", "c"], ["--ask"])
     assert "A previous run was found" not in txt and "Continue the last run" not in txt and "Cancelled." in txt
 
 
@@ -309,7 +309,7 @@ def test_post_wording():
     d = Path(tempfile.mkdtemp())
     f, l1 = post_case(d)
     ppr.save_last_run(dict(last, final=str(d / "gone.gpkg"), l1=str(l1), out=str(d / "p.gpkg")))
-    _, txt = piped(ppr.main, [str(f), "", "", "", "", "", "", "", "", "n"], ["--ask"])
+    _, txt = piped(ppr.main, [str(f), "", "", "", "", "", "", "", "", "c"], ["--ask"])
     assert "A previous run was found" not in txt and "Cancelled." in txt and "[final_harvest_final]" in txt
 
 
@@ -440,7 +440,7 @@ def test_changed_shapefile_is_one_line_per_layer():
 def test_question_details():
     d = Path(tempfile.mkdtemp())
     r, l1 = small_raster(d)
-    answers = [str(r), str(l1), str(d), "o", "2", "", "", "", "", "", "9", "n", "7", "y", "n"]
+    answers = [str(r), str(l1), str(d), "o", "2", "", "", "", "", "", "9", "n", "7", "y", "c"]
     _, txt = piped(pc.interactive, answers, dict(utm="EPSG:32632"))
     assert "   Enter keeps your earlier choice: UTM 32N (EPSG:32632)" in txt
     assert "That is large: pieces smaller than 9 acres will be removed. Use it? [y/N]" in txt
@@ -511,7 +511,7 @@ def test_output_defaults_follow_the_input():
     r1, l1 = small_raster(d / "old")
     r2, _ = small_raster(d / "new")
     prev = {"raster": str(r1), "out": str(d / "old" / "prev_out.gpkg"), "utm": "EPSG:32631"}
-    ans = [str(r2), str(l1), "", "", "", "", "", "", "", "", "", "", "n"]
+    ans = [str(r2), str(l1), "", "", "", "", "", "", "", "", "", "", "c"]
     _, txt = piped(pc.interactive, ans, dict(prev, l1=str(l1)))
     assert f"3) Output folder [{d / 'new'}]" in txt and "Output name [r_remaining_cane]" in txt and "(.geojson)  [2]:" in txt
     _, txt = piped(pc.interactive, [str(r1)] + ans[1:], dict(prev, l1=str(l1)))
@@ -519,8 +519,34 @@ def test_output_defaults_follow_the_input():
     f1, lp = post_case(d / "old")
     f2, _ = post_case(d / "new")
     prev = {"final": str(f1), "l1": str(lp), "out": str(d / "old" / "test_output_harvest_final_2.shp"), "utm": "EPSG:32631"}
-    ans = [str(f2), str(lp), "", "", "", "", "", "", "", "", "n"]
+    ans = [str(f2), str(lp), "", "", "", "", "", "", "", "", "c"]
     _, txt = piped(ppr.interactive, ans, prev)
     assert f"3) Output folder [{d / 'new'}]" in txt and "Output name [final_harvest_final]" in txt and "(.geojson)  [1]:" in txt
     _, txt = piped(ppr.interactive, [str(f1)] + ans[1:], prev)
     assert f"3) Output folder [{d / 'old'}]" in txt and "Output name [test_output_harvest_final_2]" in txt
+
+
+def test_edit_at_start_in_both_tools():
+    """'e' (or 'n') at Start? asks the questions again with the answers just given as the defaults."""
+    d = Path(tempfile.mkdtemp())
+    r, l1 = small_raster(d)
+    # Tool 1: 8 neighbours, hectares, sliver 0.5 typed in the first round; the second round is Enter only
+    first = [str(r), str(l1), str(d), "mine", "2", "y", "8", "", "hectares", "y", "0.5", "e"]
+    again = [""] * 30
+    _, txt = piped(pc.ask_all, first + again, pc.interactive, {})
+    assert "Edit: every question shows your last answer in [ ]" in txt
+    second = txt.split("Edit: every question")[1]
+    for shown in (f"[{r}]", f"[{l1}]", f"[{d}]", "[mine]", "(4 or 8) [8]", "name [2]",
+                  "slivers     : remove below 0.5 hectares"):
+        assert shown in second, (shown, second)
+    assert second.count("Your answers:") == 1 and "unit        : hectares" in second
+    assert pc.START_QUESTION in second
+    # Tool 2: the same; then cancel in the second round
+    d = Path(tempfile.mkdtemp())
+    f, lp = post_case(d)
+    first = [str(f), str(lp), str(d), "post_out", "2", "", "rai", "y", "0.3", "n"]
+    done, txt = piped(pc.ask_all, first + [""] * 9 + ["c"], ppr.interactive, {})
+    second = txt.split("Edit: every question")[1]
+    for shown in (f"[{f}]", f"[{lp}]", "[post_out]", "name [3]", "pieces <= 0.3 rai"):
+        assert shown in second, (shown, second)
+    assert done is None and "Cancelled." in second

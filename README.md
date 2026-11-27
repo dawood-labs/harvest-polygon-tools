@@ -83,14 +83,15 @@ Tool 1 asks, for example:
    Choose a number or type the name [1]:
 7) Remove slivers? [Y/n]:
    Minimum area in acres [0.2]:
-Start? [Y/n]:
+Start? [Y = start, e = edit the answers, c = cancel]:
 ```
 
 The unit answer can be the number, the name or a short form (`ha`, `rai`, `m2`, `sq km`).
 A spelling mistake is confirmed first: `Did you mean Hectares? [Y/n]:`.
 In another unit the default sliver size stays the same size as 0.2 acres: `Minimum area in rai [0.506 = 0.2 acres]:`.
 
-Read the summary (`Your answers:`) before you press Enter at `Start?`.
+Read the summary (`Your answers:`) before you press Enter at `Start?`. Something wrong: type `e`, the
+questions come again with your answers in `[ ]`; Enter keeps an answer, typing replaces it.
 Then check the result in QGIS, save your edited layer, and run Tool 2:
 
 ```
@@ -107,7 +108,7 @@ Tool 2 asks, for example:
 5) Unit for areas:
 6) Turn small harvested pieces that touch remaining cane into remaining cane? [Y/n]:
    Largest piece size in acres (pieces <= this size change) [0.2]:
-Start? [Y/n]:
+Start? [Y = start, e = edit the answers, c = cancel]:
 ```
 
 Tool 2 always writes both classes in question mode (`--classes 81` or `82` exists in flag mode).
@@ -239,7 +240,7 @@ Questions (Enter keeps the value in [brackets]):
    Unit for areas:
 7) Output folder [...]:
    Output name (saved as .xlsx) [report_stats]:
-Start? [Y/n]:
+Start? [Y = start, e = edit the answers, c = cancel]:
 ```
 
 - Levels are the fields you choose, largest unit first. Each distinct combination of their values is one row.

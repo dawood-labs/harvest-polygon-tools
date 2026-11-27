@@ -518,7 +518,7 @@ def test_question_mode_projection_default():
     import tempfile
     d = Path(tempfile.mkdtemp())
     r, l1 = _small_case(d)                                             # data centre in UTM zone 31N
-    answers = [str(r), str(l1), str(d / "new.gpkg"), "", "", "", "", "", "", "", "", "n"]   # folder, name, format
+    answers = [str(r), str(l1), str(d / "new.gpkg"), "", "", "", "", "", "", "", "", "c"]   # folder, name, format
     for prev, want in (("EPSG:32647", "[1]:"), ("EPSG:32632", "[EPSG:32632]:"), ("EPSG:32631", "[EPSG:32631]:")):
         res, txt = _piped(pc.interactive, answers, dict(utm=prev))
         line = [x for x in txt.split("\n") if "Choose number, zone" in x][0]

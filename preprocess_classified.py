@@ -3884,6 +3884,42 @@ def ask_yes_no(question, default=True):
         print("   Please answer y or n.")
 
 
+class EditAnswers(Exception):
+    """Raised at 'Start?' when the user wants to change an answer; carries the answers as new defaults."""
+
+    def __init__(self, answers):
+        super().__init__("edit")
+        self.answers = answers
+
+
+START_QUESTION = "Start? [Y = start, e = edit the answers, c = cancel]: "
+EDIT_NOTE = "\nEdit: every question shows your last answer in [ ]; press Enter to keep it, or type a new one.\n"
+
+
+def ask_start():
+    """The last question: 'start', 'edit' (go through the questions again, the answers as defaults) or
+    'cancel'. 'n' means edit: a user who says no wants to correct something."""
+    while True:
+        ans = _input(START_QUESTION).strip().lower()
+        if ans in ("", "y", "yes", "s", "start"):
+            return "start"
+        if ans in ("e", "edit", "n", "no"):
+            return "edit"
+        if ans in ("c", "cancel", "q", "quit", "exit"):
+            return "cancel"
+        print("   Type y to start, e to edit the answers or c to cancel.")
+
+
+def ask_all(questions, defaults):
+    """Run a question function until the user starts or cancels; 'edit' repeats it with the answers given."""
+    while True:
+        try:
+            return questions(defaults)
+        except EditAnswers as e:
+            defaults = dict(defaults, **e.answers)
+            print(EDIT_NOTE)
+
+
 def _file_check(exts, what):
     def check(ans):
         p = Path(clean_path(ans))
@@ -4152,9 +4188,15 @@ def interactive(defaults):
     print(f"  projection  : {utm.name} (EPSG:{utm.to_epsg()})")
     print(f"  unit        : {unit.text} (field {unit.field})")
     print(f"  slivers     : {'remove below ' + size_in_unit(min_acres, unit) if slivers else 'keep all'}")
-    if not ask_yes_no("Start?", True):
+    choice = ask_start()
+    if choice == "cancel":
         print("Cancelled.")
         return None
+    if choice == "edit":
+        epsg = utm.to_epsg()
+        raise EditAnswers(dict(raster=str(raster), l1=str(l1), out=str(out), do_filter=do_filter,
+                               neighbors=neighbors, utm=f"EPSG:{epsg}" if epsg else None, slivers=slivers,
+                               min_acres=min_acres, unit=unit.key))
     return dict(raster=raster, l1_path=l1, out=out, min_acres=min_acres, utm=utm, keep_slivers=not slivers,
                 do_filter=do_filter, neighbors=neighbors, allow_non_utm=allow, assume_l1_crs=assume, unit=unit,
                 l1_layer=l1_layer)
@@ -4342,7 +4384,7 @@ def main(argv=None):
                                     min_acres=la.get("min_acres", 0.2), unit=unit_of_record(la).key)
                     print()
             if ans is None:
-                ans = interactive(defaults)
+                ans = ask_all(interactive, defaults)
             while ans:
                 try:
                     run(**ans, **common, confirm_clean=_ask_clean, confirm_format=ask_format_switch)

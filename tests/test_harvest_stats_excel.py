@@ -340,6 +340,7 @@ def typed(monkeypatch, answers):
     it = iter(answers)
 
     def one(prompt=""):
+        print(prompt, end="")
         try:
             return next(it)
         except StopIteration:
@@ -388,6 +389,71 @@ def test_question_mode_first_report_then_only_the_new_report(tmp_path, monkeypat
     # 'n' at the first question gives the full questions back
     typed(monkeypatch, ["n"])
     assert hs.next_report(hs.load_last_run()) is None
+
+
+def test_start_question_has_three_ways(monkeypatch, capsys):
+    for typed_answer, want in (("", "start"), ("y", "start"), ("e", "edit"), ("n", "edit"), ("edit", "edit"),
+                               ("c", "cancel"), ("cancel", "cancel")):
+        typed(monkeypatch, [typed_answer])
+        assert pc.ask_start() == want
+    typed(monkeypatch, ["what", "c"])
+    assert pc.ask_start() == "cancel" and "Type y to start, e to edit the answers or c to cancel." in capsys.readouterr().out
+    seen = []
+
+    def questions(defaults):                              # 'edit' once: the answers come back as defaults
+        seen.append(dict(defaults))
+        if len(seen) == 1:
+            raise pc.EditAnswers({"unit": "hectares", "new": 1})
+        return "done"
+    assert pc.ask_all(questions, {"unit": "acres", "kept": 2}) == "done"
+    assert seen == [{"unit": "acres", "kept": 2}, {"unit": "hectares", "kept": 2, "new": 1}]
+
+
+def test_edit_at_start_keeps_every_answer(tmp_path, monkeypatch, capsys):
+    bp = boundary(tmp_path / "b.gpkg")
+    crops = crop_squares()
+    r1 = report(tmp_path / "r_2026-01-05.gpkg", crops, harvest_classes(
+        crops, step_rule(400, lambda x, y: 282 if 1500 < y < 1800 and 300 < x < 1300 else None)))
+    first = [str(bp), "2", "region", "Zone", "block", "Part", str(r1), "2026-01-06", "", "Cloud", "32631", "2",
+             str(tmp_path), "one", "n"]                   # 'n' at Start? = edit
+    again = ["", "", "", "", "", "Section", "", "", "", "", "", "", "", "", ""]      # only the 2nd title changes
+    left = typed(monkeypatch, first + again + [""])
+    hs.main(["--ask"])
+    text = capsys.readouterr().out
+    assert list(left) == [] and "Edit: every question shows your last answer in [ ]" in text
+    for shown_default in (f"[{bp}]", f"[{r1}]", "[2026-01-06]", "Name for class 282 [Cloud]", "[Zone]", "[Part]",
+                          f"[{tmp_path}]", "[one]"):
+        assert shown_default in text.split("Edit: every question")[1], shown_default
+    h, _, _ = stats_table(tmp_path / "one.xlsx")
+    assert h[:2] == ("Zone", "Section") and "Cloud on 06-01-2026" in h
+    meta, _ = hidden(tmp_path / "one.xlsx")
+    assert meta["unit"] == "hectares" and meta["reports"][0]["date"] == "2026-01-06"
+    # the short way for the next report has the same three ways
+    r2 = report(tmp_path / "r_2026-01-15.gpkg", crops, harvest_classes(crops, step_rule(800)))
+    left = typed(monkeypatch, ["", str(r2), "", str(tmp_path), "two", "e", "", "2026-01-16", "", "", "", ""])
+    hs.main(["--ask"])
+    text = capsys.readouterr().out
+    assert list(left) == [] and f"[{r2}]" in text and "[two]" in text
+    meta, _ = hidden(tmp_path / "two.xlsx")
+    assert [r["date"] for r in meta["reports"]] == ["2026-01-06", "2026-01-16"]
+    left = typed(monkeypatch, ["c"])                      # cancel writes nothing
+    r3 = report(tmp_path / "r_2026-01-25.gpkg", crops, harvest_classes(crops, step_rule(1200)))
+    typed(monkeypatch, ["", str(r3), "", str(tmp_path), "three", "c", ""])
+    hs.main(["--ask"])
+    assert not (tmp_path / "three.xlsx").exists() and "Cancelled." in capsys.readouterr().out
+
+
+def test_distinct_codes_read_from_the_attribute_file(tmp_path):
+    crops = crop_squares()
+    classes = harvest_classes(crops, step_rule(700, lambda x, y: 282 if 1500 < y < 1800 and 300 < x < 1300 else None))
+    for ext in (".shp", ".gpkg", ".geojson"):
+        rp = report(tmp_path / f"r_{ext[1:]}{ext}", crops, classes)
+        full = {hs.code_text(v) for v in pc.vector_read(rp, read_geometry=False, columns=["predicted"])[3][0]}
+        assert {hs.code_text(v) for v in hs.distinct_values(rp, "predicted")} == full == {"81", "82", "282"}
+        assert hs.other_codes(rp, "predicted") == ["282"]
+    assert sorted(hs._dbf_distinct(tmp_path / "r_shp.shp", "predicted")) == [81, 82, 282]
+    assert hs._dbf_distinct(tmp_path / "r_shp.shp", "no_such_field") is None
+    assert hs.other_codes(tmp_path / "r_shp.shp", "no_such_field") == []
 
 
 def test_negative_period_written_and_warned(tmp_path):

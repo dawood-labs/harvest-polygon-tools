@@ -238,7 +238,7 @@ def test_old_records_and_work_folders_without_unit():
     _, scr = quiet(pc.describe_last, last)
     assert "unit        : acres" in scr and "remove below 0.2 acres" in scr
     pc.save_last_run(dict(last, answers=dict(last["answers"], unit="rai")))
-    _, txt = piped(pc.main, ["n"] + [""] * 8 + ["", "", "", "n"], ["--ask"])
+    _, txt = piped(pc.main, ["n"] + [""] * 8 + ["", "", "", "c"], ["--ask"])
     assert "Choose a number or type the name [3]:" in txt and "Minimum area in rai [0.506 = 0.2 acres]:" in txt
     _, scr = quiet(ppr.describe_last, {"final": "f", "l1": "l", "out": "o", "utm": "EPSG:32631",
                                        "answers": {"rule": True, "sliver_acres": 0.2}, "status": "finished"})
@@ -490,7 +490,7 @@ def test_geojson_without_crs_dirty_and_broken_files():
         == pyproj.CRS(4326)
     res, txt = quiet(pc.run, r, d / "nocrs.geojson", d / "a.gpkg", workers=2, max_memory_gb=1)
     assert res["polygons"] > 0 and "no coordinate system" not in txt
-    answers = [str(r), str(d / "nocrs.geojson"), str(d), "q", "", "", "", "", "", "", "", "n"]
+    answers = [str(r), str(d / "nocrs.geojson"), str(d), "q", "", "", "", "", "", "", "", "c"]
     _, txt = piped(pc.interactive, answers, {})
     assert "no coordinate system" not in txt and "Cancelled." in txt
     dirty = feats + [{"type": "Feature", "properties": {}, "geometry": None},

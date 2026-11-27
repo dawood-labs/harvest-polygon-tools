@@ -303,7 +303,7 @@ def test_question_mode():
     f = write(d / "f.gpkg", [B(0, 0, 200, 196)])
     l1 = write(d / "l1.gpkg", [B(0, 0, 200, 200)])
     answers = ["& '" + str(f).replace("/", "\\") + "'", '"' + str(l1) + '"', str(d / "new"), "", "bad:name", "q", "4", "2",
-               "", "", "", "0.1", "n"]
+               "", "", "", "0.1", "c"]
     old = sys.stdin
     sys.stdin = io.StringIO("".join(a + "\n" for a in answers))
     try:

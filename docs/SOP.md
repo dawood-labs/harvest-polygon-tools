@@ -47,7 +47,7 @@ Enter keeps the value in [brackets]. Paste paths in any style.
 | `6) Unit for areas:` ... `Choose a number or type the name [1]:` | `2`, `hectares`, `ha`, `rai`, `m2`, `km2` | 1 (acres) |
 | `7) Remove slivers? [Y/n]:` | `n` = keep all | yes |
 | `   Minimum area in acres [0.2]:` | e.g. `0.5` (a big value asks `Use it? [y/N]`) | 0.2 acres |
-| `Start? [Y/n]:` | `n` = cancel (`Cancelled.`) | start |
+| `Start? [Y = start, e = edit the answers, c = cancel]:` | `e` (or `n`) = all the questions again, your answers as the defaults; `c` = cancel | start |
 
 Notes:
 - A full file path at the folder question works.
@@ -61,7 +61,8 @@ Notes:
 - A non-UTM choice (e.g. 3857) asks `Use WGS 84 / Pseudo-Mercator anyway? [y/N]:`. Press Enter (no).
 - A far zone asks `UTM zone 36 is 11 zones away from the data centre (zone 47); areas get less accurate far from the zone centre.` Press Enter (no).
 - If the output exists: `report2.shp was made by an earlier run of this tool. Replace it? [Y/n]:`.
-Read the summary (`Your answers:`) before you press Enter at `Start?`.
+Read the summary (`Your answers:`) before you press Enter at `Start?`. Something wrong: type `e`, the
+questions come again with your answers in `[ ]`; Enter keeps an answer, typing replaces it.
 
 While it runs you see `Machine: ...` and `Plan: ...` lines (processes x threads = tiles done at the same time;
 `kept free` = memory left for Windows; `memory mode: desktop` = normal PC).
@@ -110,7 +111,7 @@ python postprocess_remaining.py
 | `5) Unit for areas:` ... `Choose a number or type the name [1]:` | as in Tool 1 | 1 (acres) |
 | `6) Turn small harvested pieces that touch remaining cane into remaining cane? [Y/n]:` | `n` = keep all as 82 | yes |
 | `   Largest piece size in hectares (pieces <= this size change) [0.081 = 0.2 acres]:` | e.g. `0.2` | 0.2 acres |
-| `Start? [Y/n]:` | `n` = cancel | start |
+| `Start? [Y = start, e = edit the answers, c = cancel]:` | `e` (or `n`) = all the questions again, your answers as the defaults; `c` = cancel | start |
 
 Tool 2 always writes both classes (81 and 82).
 
@@ -223,7 +224,7 @@ python harvest_stats_excel.py
 | `   Name for class 282 [282]:` (only when the report holds a class other than 81 and 82) | a name, e.g. `Cloud` | the code (or the name used before) |
 | `6) Projection ...` and `Unit for areas:` | as in Tools 1 and 2 | the previous workbook's (must stay the same) |
 | `7) Output folder [...]:` / `   Output name (saved as .xlsx) [...]:` | a folder / a name | report folder / report name + `_stats` |
-| `Start? [Y/n]:` | `n` = cancel | start |
+| `Start? [Y = start, e = edit the answers, c = cancel]:` | `e` (or `n`) = all the questions again, your answers as the defaults; `c` = cancel | start |
 
 Next report: run Tool 3 again with the new report and give the workbook of the report before at question 5.
 The new workbook holds all reports so far. Keep the same boundary fields, unit and projection all season.
