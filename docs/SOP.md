@@ -219,10 +219,9 @@ What the workbook holds:
 |---|---|
 | Dashboard | key numbers in tiles, charts (progress, per period, per unit, top 10 remaining), a summary table |
 | Stats | one row per unit; `Crop Harvested on DD-MM-YYYY` = harvested in that period only; `Totals` row |
-| By ... | the same table for each larger level |
 | Pivot | pivot table: one row per unit, columns = total crop and harvested in each period (tick more fields in the list on the right) |
 | Data | long table (one row per unit, date and measure) for your own pivots |
-| Chart data | the numbers of the charts |
+| Chart data (hidden) | the numbers of the charts |
 
 - Reports must be cumulative (each covers the whole crop area). 81 + other codes = remaining, 82 = harvested.
 - A code other than 81 and 82 gets its own column, e.g. `282 on 12-01-2026`. You may rename it; the next workbook keeps your title.

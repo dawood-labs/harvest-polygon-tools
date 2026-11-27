@@ -221,8 +221,7 @@ def test_levels_match_reference(tmp_path, n_levels):
     total = sum(sum(v.values()) for v in ref.values())
     assert close(rows[-1][n_levels], total, 1e-6) and res["check_ok"]
     assert "OK" in txt and "RESULT" in txt
-    coarser = [s for s in wb.sheetnames if s.startswith("By ")]
-    assert coarser == [f"By {x}" for x in levels[:n_levels - 1]]
+    assert not [s for s in wb.sheetnames if s.startswith("By ")]       # larger levels: Pivot and Dashboard
 
 
 def chain3(tmp_path, b_name="b.gpkg"):
@@ -499,7 +498,9 @@ def chart_refs(path):
 def test_workbook_structure_charts_and_pivot(tmp_path):
     bp, rps, dates, outs, res, txt = chain3(tmp_path)
     wb = openpyxl.load_workbook(outs[-1])
-    assert wb.sheetnames == ["Dashboard", "Stats", "By region", "Data", "Pivot", "Chart data", hs.DATA_SHEET]
+    assert wb.sheetnames == ["Dashboard", "Stats", "Data", "Pivot", "Chart data", hs.DATA_SHEET]
+    assert wb["Chart data"].sheet_state == "hidden"
+    assert [w.title for w in wb.worksheets if w.sheet_state == "visible"] == ["Dashboard", "Stats", "Data", "Pivot"]
     assert wb[hs.DATA_SHEET].sheet_state == "veryHidden"
     assert wb.active.title == "Dashboard"
     assert wb.properties.title and wb.properties.subject
@@ -666,7 +667,7 @@ def test_awkward_field_names_and_titles(tmp_path):
     res2, txt2, out2 = run(tmp_path, bp, [AWKWARD[2], AWKWARD[3]], rp, "2026-01-10", "t.xlsx",
                            titles=["Zone title", "Sub: unit / part"])
     wb2 = openpyxl.load_workbook(out2)
-    assert "By Zone title" in wb2.sheetnames
+    assert wb2["Pivot"]["A1"].value == "Harvest by Zone title and Sub: unit / part"
     h2, _, _ = stats_table(out2)
     assert h2[:2] == ("Zone title", "Sub: unit / part")
     meta, _ = hidden(out2)

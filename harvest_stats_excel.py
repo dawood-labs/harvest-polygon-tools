@@ -21,8 +21,8 @@ Steps
   3. Areas per row and class code, in the chosen unit, full precision; rounded only for display.
   4. The new report is added to the history of the previous workbook (checks: same unit, projection and
      level fields; the date is new and later; the total crop area per row stays the same; a file that
-     looks incremental is refused) and the workbook is written: Dashboard, Stats, one sheet per coarser
-     level, Data, Pivot (a real pivot table plus a plain cross-table), Chart data, hidden data sheet.
+     looks incremental is refused) and the workbook is written: Dashboard, Stats, Data, Pivot (a real
+     pivot table on Stats), the hidden sheet with the numbers of the charts, hidden data sheet.
   5. Written under a temporary name and swapped in at the end.
 
 Run without arguments (or with --ask) for questions; every answer is also a flag:
@@ -165,20 +165,6 @@ def row_sort_key(key):
 
 
 SHEET_BAD = re.compile(r"[\[\]:*?/\\]")
-
-
-def sheet_title(text, taken):
-    """An Excel sheet name: no [ ] : * ? / \\, no leading/trailing apostrophe, at most 31 characters,
-    unique without regard to case (taken = set of casefolded names already used; updated)."""
-    s = clean_text(SHEET_BAD.sub("_", str(text))).strip("'") or "Sheet"
-    base = s[:31].rstrip()
-    name, k = base, 2
-    while name.casefold() in taken or name.casefold() == "history":
-        tail = f" ({k})"
-        name = base[:31 - len(tail)].rstrip() + tail
-        k += 1
-    taken.add(name.casefold())
-    return name
 
 
 def unique_headers(names):
@@ -885,7 +871,6 @@ def build_workbook(tab, levels, unit, area_crs, meta, report_info, previous_name
     """The whole workbook (openpyxl Workbook) and facts for the result block."""
     wb = openpyxl.Workbook()
     titles = [lv["title"] for lv in levels]
-    taken = {n.casefold() for n in ("Dashboard", "Stats", "Data", "Pivot", "Chart data", DATA_SHEET)}
     last = tab.dates[-1]
     nl = tab.nl
     af = area_format(unit)
@@ -904,15 +889,6 @@ def build_workbook(tab, levels, unit, area_crs, meta, report_info, previous_name
     facts["negatives"] = negs
     facts["rows"] = len(rows)
     meta["code_columns"] = {"sheet": "Stats", "row": hr, "columns": code_cols, "all_headers": header}
-
-    # ---- one sheet per coarser level
-    for n in range(1, nl):
-        name = sheet_title(f"By {titles[n - 1]}", taken)
-        ws = wb.create_sheet(name)
-        h, _ = tab.header_texts(titles[:n])
-        r2, t2 = stats_rows(tab, n, titles)
-        ng, pc2 = column_roles(tab, n)
-        write_table(ws, 1, h, r2, t2, n, unit, line, ng, pc2)
 
     # ---- Data (long format, for the user's own pivots)
     ds = wb.create_sheet("Data")
@@ -972,6 +948,7 @@ def build_workbook(tab, levels, unit, area_crs, meta, report_info, previous_name
 
     # ---- Chart data + Dashboard
     cd = wb.create_sheet("Chart data")
+    cd.sheet_state = "hidden"            # the charts need their numbers in cells; nobody has to look at them
     write_dashboard(dash, cd, dashboard_results(tab, titles, unit, area_crs, report_info, previous_name))
 
     write_data_sheet(wb, meta, tab.values)
@@ -1512,8 +1489,8 @@ def write_dashboard(dash, cd, res):
     notes = [f"Report: {res['report']}   |   Boundary: {res['boundary']}"
              + (f"   |   Previous workbook: {res['previous']}" if res["previous"] else ""),
              f"Projection for areas: {res['projection']}   |   Levels: " + " > ".join(res["level_titles"]),
-             "Remaining = every class that is not harvested. The charts read their numbers from the sheet "
-             "'Chart data'; the full table is on 'Stats'."]
+             "Remaining = every class that is not harvested. The charts read their numbers from the hidden "
+             "sheet 'Chart data'; the full table is on 'Stats'."]
     for text in notes:
         put(dash, row, 2, text, font=font(9, italic=True, color=C_INK2))
         row += 1
