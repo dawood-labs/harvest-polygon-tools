@@ -21,7 +21,7 @@ Steps
   3. Areas per row and class code, in the chosen unit, full precision; rounded only for display.
   4. The new report is added to the history of the previous workbook (checks: same unit, projection and
      level fields; the date is new and later; the total crop area per row stays the same; a file that
-     looks incremental is refused) and the workbook is written: Dashboard, Stats, Data, Pivot (a real
+     looks incremental is refused) and the workbook is written: Dashboard, Stats, Pivot (a real
      pivot table on Stats), the hidden sheet with the numbers of the charts, hidden data sheet.
   5. Written under a temporary name and swapped in at the end.
 
@@ -77,7 +77,6 @@ from openpyxl.drawing.xdr import XDRPositiveSize2D  # noqa: E402
 from openpyxl.formatting.rule import DataBarRule  # noqa: E402
 from openpyxl.styles import Alignment, Border, Font, PatternFill, Side  # noqa: E402
 from openpyxl.utils import get_column_letter  # noqa: E402
-from openpyxl.worksheet.table import Table, TableStyleInfo  # noqa: E402
 
 UserError = pc.UserError
 TOOL = "harvest_stats_excel"
@@ -873,7 +872,6 @@ def build_workbook(tab, levels, unit, area_crs, meta, report_info, previous_name
     titles = [lv["title"] for lv in levels]
     last = tab.dates[-1]
     nl = tab.nl
-    af = area_format(unit)
     uname = unit.text
     facts = {}
 
@@ -889,54 +887,6 @@ def build_workbook(tab, levels, unit, area_crs, meta, report_info, previous_name
     facts["negatives"] = negs
     facts["rows"] = len(rows)
     meta["code_columns"] = {"sheet": "Stats", "row": hr, "columns": code_cols, "all_headers": header}
-
-    # ---- Data (long format, for the user's own pivots)
-    ds = wb.create_sheet("Data")
-    dhead = unique_headers(titles + ["Report date", "Measure", "Area"])
-    measures = ["Harvested in period", "Remaining at date", "Total harvested at date"]
-    code_measure = {}
-    for d in tab.dates:
-        for c in tab.other[d]:
-            if c not in code_measure:
-                lab = code_label(c, tab.labels)
-                code_measure[c] = f"Code {c}" + (f" ({lab})" if lab else "")
-    measures += list(code_measure.values())
-    data_rows = []
-    for k in tab.keys:
-        lv = [OUTSIDE] * nl if k == OUTSIDE_KEY else tab.level_cells(k)
-        nums = tab.numbers(k)
-        for i, d in enumerate(tab.dates):
-            dd = dt.date.fromisoformat(d)
-            data_rows.append(lv + [dd, measures[0], nums["period"][i]])
-            data_rows.append(lv + [dd, measures[1], tab.at(k, d) - nums["cum"][i]])
-            data_rows.append(lv + [dd, measures[2], nums["cum"][i]])
-            for c in tab.other[d]:
-                data_rows.append(lv + [dd, code_measure[c], nums["other"][(c, d)]])
-    put(ds, 1, 1, f"All areas in {uname}. One row per unit, report date and measure, for your own pivot tables or charts.",
-        font=font(10, italic=True, color=C_INK2))
-    for c, h in enumerate(dhead, 1):
-        put(ds, 2, c, h, font=font(10, True, "FFFFFF"), fill=fill(C_HEAD))
-    for i, rv in enumerate(data_rows, 3):
-        for c, v in enumerate(rv, 1):
-            cell = put(ds, i, c, v, font=font(10))
-            if c == nl + 1:
-                cell.number_format = "DD-MM-YYYY"
-            elif c == nl + 3:
-                cell.number_format = af
-    last_row = 2 + len(data_rows)
-    ref = f"A2:{get_column_letter(len(dhead))}{last_row}"
-    tbl = Table(displayName="HarvestData", ref=ref)
-    tbl.tableStyleInfo = TableStyleInfo(name="TableStyleLight1", showRowStripes=True)
-    ds.add_table(tbl)
-    for c, h in enumerate(dhead, 1):
-        if c <= nl:
-            w = min(max([len(str(r[c - 1])) for r in data_rows[:5000]] + [len(h), 8]) + 2, 45)
-        else:
-            w = {nl + 1: 14, nl + 2: 26, nl + 3: 16}[c]
-        ds.column_dimensions[get_column_letter(c)].width = w
-    ds.freeze_panes = "A3"
-    ds.sheet_view.showGridLines = False
-    facts["data_rows"] = len(data_rows)
 
     # ---- Pivot
     pv = wb.create_sheet("Pivot")

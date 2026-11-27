@@ -290,7 +290,6 @@ The last row is `Totals` (the percentages are computed from the totals).
 |---|---|
 | Dashboard | title band, five tiles with the key numbers, up to six charts (Excel charts, editable), a summary table of the first level |
 | Stats | the table at the finest level, frozen header, filter, Totals row |
-| Data | one row per unit, report date and measure (Harvested in period, Remaining at date, Total harvested at date, one per other code) |
 | Pivot | a real pivot table on the Stats table: one row per unit of the first level with its lower levels under it; columns = total crop and harvested in each period; the four total columns are in the field list, not ticked. The same numbers stay as plain cells with `--no-pivot` |
 | Chart data (hidden) | the numbers the charts read; right-click a sheet tab > Unhide to see it |
 | (very hidden) | a machine-readable copy of all numbers; the next run reads only this. Edit the visible sheets freely |

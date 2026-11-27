@@ -295,8 +295,8 @@ def test_other_code_is_remaining_with_its_own_column(tmp_path):
     _, values = hidden(o3)
     ref3, ref3_out = reference(bp, ["region", "block"], r3)
     assert_matches(values, "2026-01-25", ref3, ref3_out)
-    data = list(wb3["Data"].iter_rows(values_only=True))
-    assert any(r[3] == "Code 282" for r in data[2:])
+    pv3 = wb3["Pivot"]                                   # the code's column is ticked in the pivot too
+    assert "Sum of 282 on 15-01-2026" in [c.value for c in pv3[hs.PIVOT_TOP]]
 
 
 def test_negative_period_written_and_warned(tmp_path):
@@ -498,9 +498,9 @@ def chart_refs(path):
 def test_workbook_structure_charts_and_pivot(tmp_path):
     bp, rps, dates, outs, res, txt = chain3(tmp_path)
     wb = openpyxl.load_workbook(outs[-1])
-    assert wb.sheetnames == ["Dashboard", "Stats", "Data", "Pivot", "Chart data", hs.DATA_SHEET]
+    assert wb.sheetnames == ["Dashboard", "Stats", "Pivot", "Chart data", hs.DATA_SHEET]
     assert wb["Chart data"].sheet_state == "hidden"
-    assert [w.title for w in wb.worksheets if w.sheet_state == "visible"] == ["Dashboard", "Stats", "Data", "Pivot"]
+    assert [w.title for w in wb.worksheets if w.sheet_state == "visible"] == ["Dashboard", "Stats", "Pivot"]
     assert wb[hs.DATA_SHEET].sheet_state == "veryHidden"
     assert wb.active.title == "Dashboard"
     assert wb.properties.title and wb.properties.subject
@@ -673,8 +673,8 @@ def test_awkward_field_names_and_titles(tmp_path):
     meta, _ = hidden(out2)
     assert meta["levels"] == [{"field": "Zone", "title": "Zone title"}, {"field": "zone*", "title": "Sub: unit / part"}]
     res3, txt3, out3 = run(tmp_path, bp, ["name", "name_2"], rp, "2026-01-10", "u.xlsx", titles=["Area", "Measure"])
-    data_head = list(openpyxl.load_workbook(out3)["Data"].iter_rows(min_row=2, max_row=2, values_only=True))[0]
-    assert len({str(h).casefold() for h in data_head}) == len(data_head)   # unique table headers
+    h3, _, _ = stats_table(out3)
+    assert len({str(h).casefold() for h in h3}) == len(h3)                 # unique table headers
 
 
 @pytest.mark.parametrize("fmt", [".shp", ".gpkg", ".geojson"])
